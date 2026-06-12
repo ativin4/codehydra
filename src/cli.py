@@ -1,5 +1,7 @@
 import subprocess
+import shlex
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import typer
 from rich.console import Console
 from rich.live import Live
@@ -175,6 +177,56 @@ def chat():
                     console.print(f"[dim]Turns by CLI: {breakdown}[/dim]")
                     console.print(f"[dim]Total tokens (where reported): {total_tokens}[/dim]")
                     console.print("[dim]Note: BYOS subscriptions are flat-rate; token counts are usage indicators, not billed cost.[/dim]")
+                    continue
+                elif cmd.startswith("parallel"):
+                    try:
+                        prompts = shlex.split(user_input[len("/parallel"):].strip())
+                    except ValueError as e:
+                        console.print(f"[red]Could not parse prompts: {e}[/red]")
+                        continue
+                    if len(prompts) < 2:
+                        console.print('[red]Usage: /parallel "task one" "task two" ...[/red]')
+                        continue
+
+                    console.print(
+                        f"[yellow]Running {len(prompts)} tasks in parallel "
+                        f"(each spawns its own CLI process; agentic edits to the same "
+                        f"files may conflict)...[/yellow]"
+                    )
+
+                    def run_task(prompt):
+                        gw = Gateway()
+                        result = gw.request(
+                            prompt,
+                            tier=effort_tier,
+                            history=history,
+                            cli_override=cli_override,
+                            model_override=model_override,
+                        )
+                        return result, gw.last_usage
+
+                    with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+                        futures = {executor.submit(run_task, p): p for p in prompts}
+                        for future in as_completed(futures):
+                            prompt = futures[future]
+                            try:
+                                result, usage = future.result()
+                            except Exception as e:
+                                console.print(Panel(f"[red]{e}[/red]", title=f"❌ {prompt[:60]}"))
+                                continue
+                            console.print(Panel(Markdown(result), title=f"\U0001f916 {prompt[:60]}"))
+                            history.append({"role": "user", "content": prompt})
+                            history.append({"role": "assistant", "content": result})
+                            if usage:
+                                usage_log.append(usage)
+
+                    sessions.save(session_id, {
+                        "history": history,
+                        "effort_tier": effort_tier,
+                        "cli_override": cli_override,
+                        "model_override": model_override,
+                        "usage_log": usage_log,
+                    })
                     continue
                 else:
                     console.print(f"[red]Unknown command: {cmd}[/red]")
