@@ -1,6 +1,7 @@
 import subprocess
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.markdown import Markdown
 from src.routing.gateway import Gateway
@@ -126,41 +127,44 @@ def chat():
             # Standard chat interaction
             current_prompt = user_input
             while True: # Self-healing loop
-                with console.status("[bold green]Hydra is working...[/bold green]"):
-                    try:
-                        response = gateway.request(
+                try:
+                    console.print("\n[bold magenta]🤖 Hydra:[/bold magenta]")
+                    response = ""
+                    with Live(Markdown(""), console=console, refresh_per_second=10) as live:
+                        for chunk in gateway.request_stream(
                             current_prompt,
                             tier=effort_tier,
                             history=history,
                             cli_override=cli_override,
                             model_override=model_override,
-                        )
-                        history.append({"role": "user", "content": current_prompt})
-                        history.append({"role": "assistant", "content": response})
-                        
-                        console.print("\n[bold magenta]🤖 Hydra:[/bold magenta]")
-                        console.print(Markdown(response))
-                        
-                        # Check for patches
-                        patched_files = patcher.apply_all_patches(response)
-                        if patched_files:
-                            console.print(f"[green]Applied patches to: {', '.join(patched_files)}[/green]")
-                            
-                            # Run build
-                            exit_code, output = compiler.run_build()
-                            if exit_code == 0:
-                                console.print("[bold green]✅ Build successful![/bold green]")
-                                break # Done with this prompt
-                            else:
-                                console.print(f"[bold red]❌ Build failed (Exit {exit_code}). Feed back to Hydra...[/bold red]")
-                                current_prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
-                                continue # Iterate
+                        ):
+                            response += chunk
+                            live.update(Markdown(response))
+                    response = response.strip()
+
+                    history.append({"role": "user", "content": current_prompt})
+                    history.append({"role": "assistant", "content": response})
+
+                    # Check for patches
+                    patched_files = patcher.apply_all_patches(response)
+                    if patched_files:
+                        console.print(f"[green]Applied patches to: {', '.join(patched_files)}[/green]")
+
+                        # Run build
+                        exit_code, output = compiler.run_build()
+                        if exit_code == 0:
+                            console.print("[bold green]✅ Build successful![/bold green]")
+                            break # Done with this prompt
                         else:
-                            break # No patches, just a normal chat
-                    except Exception as e:
-                        console.print(f"[red]Error: {e}[/red]")
-                        break
-                
+                            console.print(f"[bold red]❌ Build failed (Exit {exit_code}). Feed back to Hydra...[/bold red]")
+                            current_prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
+                            continue # Iterate
+                    else:
+                        break # No patches, just a normal chat
+                except Exception as e:
+                    console.print(f"[red]Error: {e}[/red]")
+                    break
+
         except KeyboardInterrupt: break
         except EOFError: break
 
