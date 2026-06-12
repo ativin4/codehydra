@@ -2,7 +2,7 @@
 
 **Bring Your Own Subscription (BYOS).** CodeHydra is a zero-GUI, autonomous coding agent that bypasses pay-per-token API gates by scavenging local OAuth session tokens from your official developer tools.
 
-[![Tests](https://github.com/your-username/codehydra/actions/workflows/test.yml/badge.svg)](https://github.com/your-username/codehydra/actions)
+[![Tests](https://github.com/ativin4/codehydra/actions/workflows/test.yml/badge.svg)](https://github.com/ativin4/codehydra/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ⚡ Core Superpowers
@@ -23,7 +23,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 2. Installation
 ```bash
-git clone https://github.com/your-username/codehydra.git
+git clone https://github.com/ativin4/codehydra.git
 cd codehydra
 uv sync
 ```
