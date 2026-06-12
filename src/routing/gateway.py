@@ -94,16 +94,19 @@ class Gateway:
 
     @staticmethod
     def _builtin_mcp_servers() -> Dict[str, Dict]:
-        """The "codehydra-agents" MCP server (src/mcp/server.py) gives the
-        active CLI a `dispatch_agents` tool to fan out independent sub-tasks
-        to parallel CodeHydra-routed agents, mirroring Claude Code's Task
-        tool. Disabled for sub-agents themselves (CODEHYDRA_ENABLE_SUBAGENTS=0)
-        to avoid unbounded recursive fan-out.
+        """The "codehydra-tools" MCP server (src/mcp/server.py) gives the
+        active CLI extra CodeHydra-native tools: `dispatch_agents` to fan
+        independent sub-tasks out to parallel CodeHydra-routed agents
+        (mirroring Claude Code's Task tool), and `run_in_background` /
+        `get_background_output` / `stop_background_task` for long-lived
+        processes (mirroring Claude Code's background Bash + Monitor).
+        Disabled for sub-agents themselves (CODEHYDRA_ENABLE_SUBAGENTS=0) to
+        avoid unbounded recursive fan-out.
         """
         if os.environ.get("CODEHYDRA_ENABLE_SUBAGENTS") == "0":
             return {}
         return {
-            "codehydra-agents": {
+            "codehydra-tools": {
                 "command": sys.executable,
                 "args": ["-m", "src.mcp.server"],
             }

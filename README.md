@@ -17,6 +17,7 @@
 - **Usage Tracking**: `/cost` summarizes which CLI/model/tier handled each turn and token counts where reported.
 - **MCP Native**: Declare MCP servers in `.agentrc.toml` and they're wired into whichever backend CLI is active.
 - **Autonomous Subagents**: Every backend CLI is given a built-in `dispatch_agents` tool (mirroring Claude Code's Task tool) so it can fan independent sub-tasks out to parallel CodeHydra-routed agents on its own, mid-turn.
+- **Background Tasks**: The same built-in toolset gives the CLI `run_in_background`/`get_background_output`/`stop_background_task` (mirroring Claude Code's background Bash + Monitor) for long-lived processes like dev servers, surviving past the current turn.
 - **Configurable Routing**: Override CLI priority and model choices per tier in `.agentrc.toml` without touching code.
 
 ## 🚀 Quick Start
