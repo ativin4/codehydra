@@ -1,0 +1,165 @@
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional
+
+class Scavenger:
+    def __init__(self):
+        self.home = Path.home()
+
+    def get_claude_token(self) -> Optional[str]:
+        """Extracts Claude Code token from ~/.claude/.credentials.json or Keychain."""
+        # Try filesystem first
+        paths = [
+            self.home / ".claude" / ".credentials.json",
+            self.home / ".claude" / "session.json",
+        ]
+        for cred_path in paths:
+            if cred_path.exists():
+                try:
+                    with open(cred_path, "r") as f:
+                        data = json.load(f)
+                        token = data.get("accessToken") or data.get("token") or data.get("sessionToken")
+                        if token:
+                            return token
+                except Exception:
+                    pass
+
+        # Try macOS Keychain
+        if sys.platform == "darwin":
+            try:
+                # Claude Code might store tokens in Keychain
+                result = subprocess.run(
+                    ["security", "find-generic-password", "-s", "claude-code", "-w"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except Exception:
+                pass
+
+        return None
+
+    def get_copilot_token(self) -> Optional[str]:
+        """Extracts GitHub Copilot token from hosts.json or 'gh auth token'."""
+        paths = [
+            self.home / ".config" / "gh" / "hosts.yml",
+            self.home / ".config" / "github-copilot" / "hosts.json",
+            self.home / ".copilot" / "config.json",
+        ]
+
+        for path in paths:
+            if path.exists():
+                try:
+                    if path.suffix == ".yml" or path.suffix == ".yaml":
+                        # Basic YAML parsing without external lib for just the token
+                        with open(path, "r") as f:
+                            content = f.read()
+                            import re
+                            match = re.search(r"oauth_token:\s*(\S+)", content)
+                            if match:
+                                return match.group(1)
+                    else:
+                        with open(path, "r") as f:
+                            data = json.load(f)
+                            if "github.com" in data:
+                                return data["github.com"].get("oauth_token")
+                            return data.get("oauth_token") or data.get("token")
+                except Exception:
+                    continue
+
+        # Fallback to 'gh' CLI
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "token"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+        return None
+
+    def get_google_headers(self) -> Dict[str, str]:
+        """Extracts Google ADC headers."""
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request
+
+            credentials, project = google.auth.default()
+            if not credentials.valid:
+                credentials.refresh(Request())
+            
+            headers = {}
+            credentials.apply(headers)
+            if project and "x-goog-user-project" not in headers:
+                headers["x-goog-user-project"] = project
+            return headers
+        except Exception:
+            return {}
+
+    def get_gemini_cli_token(self) -> Optional[str]:
+        """Extracts token from Gemini CLI (~/.gemini/oauth_creds.json)."""
+        # Gemini CLI uses this path for its session tokens
+        cred_path = self.home / ".gemini" / "oauth_creds.json"
+        if cred_path.exists():
+            try:
+                with open(cred_path, "r") as f:
+                    data = json.load(f)
+                    # Gemini CLI usually stores the access token directly
+                    return data.get("access_token") or data.get("token")
+            except Exception:
+                pass
+        return None
+
+    def get_active_providers(self) -> List[str]:
+        """Returns a list of providers with active subscriptions."""
+        providers = []
+        if self.get_claude_token(): providers.append("anthropic")
+        if self.get_copilot_token(): providers.append("github")
+        if self.get_google_headers(): providers.append("google")
+        if self.get_gemini_cli_token(): providers.append("gemini_cli")
+        return providers
+
+    def get_all_headers(self) -> Dict[str, str]:
+        """Aggregates all found credentials into a header dictionary."""
+        headers = {}
+        
+        gemini_token = self.get_gemini_cli_token()
+        if gemini_token:
+            headers["authorization"] = f"Bearer {gemini_token}"
+
+        claude_token = self.get_claude_token()
+        if claude_token:
+            headers["anthropic-session-token"] = claude_token
+
+        copilot_token = self.get_copilot_token()
+        if copilot_token:
+            headers["github-copilot-token"] = copilot_token
+
+        google_hdrs = self.get_google_headers()
+        headers.update(google_hdrs)
+
+        return headers
+
+    def apply_to_env(self):
+        """Applies scavenged credentials to environment variables for tools that expect them."""
+        # For Google ADC, if we have a project ID, set it
+        hdrs = self.get_google_headers()
+        if "x-goog-user-project" in hdrs:
+            os.environ["GOOGLE_CLOUD_PROJECT"] = hdrs["x-goog-user-project"]
+        
+        # We don't want to set ANTHROPIC_API_KEY if we are using session tokens
+        # but some tools might need a dummy key to bypass initial checks
+        # os.environ["ANTHROPIC_API_KEY"] = "sk-ant-session-bypass"
+
+if __name__ == "__main__":
+    scavenger = Scavenger()
+    print(json.dumps(scavenger.get_all_headers(), indent=2))
