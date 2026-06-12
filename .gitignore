@@ -2,5 +2,6 @@
 __pycache__/
 *.pyc
 .agentrc.toml
+.codehydra/
 node_modules/
 .DS_Store

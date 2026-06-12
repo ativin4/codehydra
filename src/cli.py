@@ -5,6 +5,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.markdown import Markdown
 from src.routing.gateway import Gateway
+from src.routing.session import SessionManager
 from src.tools.scanner import Scanner
 from src.tools.patcher import Patcher
 from src.tools.compiler import Compiler
@@ -15,6 +16,7 @@ gateway = Gateway()
 scanner = Scanner()
 patcher = Patcher()
 compiler = Compiler()
+sessions = SessionManager()
 
 # How to launch the interactive login/auth flow for each underlying CLI.
 LOGIN_COMMANDS = {
@@ -74,6 +76,7 @@ def chat():
     effort_tier = None
     cli_override = None
     model_override = None
+    session_id = sessions.new_session_id()
 
     while True:
         try:
@@ -120,6 +123,28 @@ def chat():
                         model_override = None if parts[1].lower() == "auto" else parts[1]
                         console.print(f"[yellow]Model override set to {parts[1]}[/yellow]")
                     continue
+                elif cmd == "sessions":
+                    saved = sessions.list_sessions()
+                    if not saved:
+                        console.print("[dim]No saved sessions.[/dim]")
+                    for s in saved:
+                        marker = " (current)" if s["id"] == session_id else ""
+                        console.print(f"  [cyan]{s['id']}[/cyan]{marker} - {s['preview']}")
+                    continue
+                elif cmd.startswith("resume"):
+                    parts = cmd.split(" ")
+                    target = parts[1] if len(parts) == 2 else sessions.latest_session_id(exclude=session_id)
+                    data = sessions.load(target) if target else None
+                    if not data:
+                        console.print(f"[red]No session found: {target or '(none saved)'}[/red]")
+                    else:
+                        session_id = target
+                        history = data.get("history", history)
+                        effort_tier = data.get("effort_tier")
+                        cli_override = data.get("cli_override")
+                        model_override = data.get("model_override")
+                        console.print(f"[yellow]Resumed session {session_id}[/yellow]")
+                    continue
                 else:
                     console.print(f"[red]Unknown command: {cmd}[/red]")
                     continue
@@ -144,6 +169,12 @@ def chat():
 
                     history.append({"role": "user", "content": current_prompt})
                     history.append({"role": "assistant", "content": response})
+                    sessions.save(session_id, {
+                        "history": history,
+                        "effort_tier": effort_tier,
+                        "cli_override": cli_override,
+                        "model_override": model_override,
+                    })
 
                     # Check for patches
                     patched_files = patcher.apply_all_patches(response)
