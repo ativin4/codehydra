@@ -91,17 +91,17 @@ This document outlines the phased development strategy, milestones, and verifica
   * Persist conversation history + active model/effort/cli state to `.codehydra/sessions/<id>.json`.
   * Add `/resume [id]` and `/sessions` (list) commands.
 
-### Milestone 4.4: Usage & Cost Tracking
+### Milestone 4.4: Usage & Cost Tracking ✅
 * **Target Files:** `src/routing/gateway.py`, `src/cli.py`
 * **Deliverables:**
-  * Parse token/cost info from each CLI's output where available.
-  * Add `/cost` command summarizing spend-equivalent and tier/CLI breakdown for the session.
+  * Parse token/cost info from each CLI's output where available (currently `codex`'s "tokens used" line; other CLIs report `n/a`).
+  * Add `/cost` command summarizing tier/CLI breakdown and token totals for the session, persisted across `/resume`.
 
-### Milestone 4.5: MCP Tooling Wired In
-* **Target Files:** `src/mcp/client.py`, `src/routing/gateway.py`, `.agentrc.toml`
+### Milestone 4.5: MCP Tooling Wired In ✅
+* **Target Files:** `src/mcp/config.py` (new), `src/routing/gateway.py`, `.agentrc.toml`
 * **Deliverables:**
-  * Load MCP servers declared in `.agentrc.toml`.
-  * Expose their tools to whichever backend CLI supports external tool/MCP configs (pass-through MCP config flags).
+  * Load MCP servers declared in `.agentrc.toml` (`[mcp.servers.<name>]`).
+  * Pass them through to whichever backend CLI is active via its native MCP config: claude (`--mcp-config`), gemini (`.gemini/settings.json`), codex (`-c mcp_servers.<name>.*` overrides).
 
 ### Milestone 4.6: Packaging & Distribution
 * **Target Files:** `pyproject.toml`, `.github/workflows/`

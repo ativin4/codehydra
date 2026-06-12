@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 .agentrc.toml
 .codehydra/
+.gemini/
 node_modules/
 .DS_Store

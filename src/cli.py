@@ -1,9 +1,11 @@
 import subprocess
+from collections import Counter
 import typer
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.table import Table
 from src.routing.gateway import Gateway
 from src.routing.session import SessionManager
 from src.tools.scanner import Scanner
@@ -76,6 +78,7 @@ def chat():
     effort_tier = None
     cli_override = None
     model_override = None
+    usage_log = []
     session_id = sessions.new_session_id()
 
     while True:
@@ -143,7 +146,35 @@ def chat():
                         effort_tier = data.get("effort_tier")
                         cli_override = data.get("cli_override")
                         model_override = data.get("model_override")
+                        usage_log = data.get("usage_log", [])
                         console.print(f"[yellow]Resumed session {session_id}[/yellow]")
+                    continue
+                elif cmd == "cost":
+                    if not usage_log:
+                        console.print("[dim]No usage recorded yet this session.[/dim]")
+                        continue
+                    table = Table(title="Session Usage")
+                    table.add_column("#", justify="right")
+                    table.add_column("CLI")
+                    table.add_column("Model")
+                    table.add_column("Tier")
+                    table.add_column("Tokens", justify="right")
+                    for i, entry in enumerate(usage_log, 1):
+                        tokens = entry.get("tokens")
+                        table.add_row(
+                            str(i),
+                            entry.get("cli", "?"),
+                            entry.get("model", "?"),
+                            entry.get("tier", "?"),
+                            str(tokens) if tokens is not None else "n/a",
+                        )
+                    console.print(table)
+                    cli_counts = Counter(entry["cli"] for entry in usage_log)
+                    breakdown = ", ".join(f"{cli}: {count}" for cli, count in cli_counts.items())
+                    total_tokens = sum(entry.get("tokens") or 0 for entry in usage_log)
+                    console.print(f"[dim]Turns by CLI: {breakdown}[/dim]")
+                    console.print(f"[dim]Total tokens (where reported): {total_tokens}[/dim]")
+                    console.print("[dim]Note: BYOS subscriptions are flat-rate; token counts are usage indicators, not billed cost.[/dim]")
                     continue
                 else:
                     console.print(f"[red]Unknown command: {cmd}[/red]")
@@ -169,11 +200,14 @@ def chat():
 
                     history.append({"role": "user", "content": current_prompt})
                     history.append({"role": "assistant", "content": response})
+                    if gateway.last_usage:
+                        usage_log.append(gateway.last_usage)
                     sessions.save(session_id, {
                         "history": history,
                         "effort_tier": effort_tier,
                         "cli_override": cli_override,
                         "model_override": model_override,
+                        "usage_log": usage_log,
                     })
 
                     # Check for patches
