@@ -54,6 +54,7 @@ command = "pytest" # or "npm run build", "go build", etc.
 | `/effort <low\|medium\|high>` | Set the effort tier (affects model choice) |
 | `/cli <auto\|claude\|gemini\|codex>` | Pin the backend CLI for the session |
 | `/model <name\|auto>` | Pin an exact model, bypassing the routing table |
+| `/mode <plan\|yolo>` | `plan` = read-only (no edits/commands); `yolo` = auto-approve everything (default) |
 | `/login <claude\|gemini\|codex>` | Launch a backend CLI's interactive auth flow |
 | `/parallel "task 1" "task 2" ...` | Run multiple prompts concurrently (each in its own CLI process), results shown as they complete |
 | `/sessions` | List saved sessions |

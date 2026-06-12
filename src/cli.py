@@ -80,6 +80,7 @@ def chat():
     effort_tier = None
     cli_override = None
     model_override = None
+    mode = "yolo"
     usage_log = []
     session_id = sessions.new_session_id()
 
@@ -128,6 +129,17 @@ def chat():
                         model_override = None if parts[1].lower() == "auto" else parts[1]
                         console.print(f"[yellow]Model override set to {parts[1]}[/yellow]")
                     continue
+                elif cmd.startswith("mode"):
+                    parts = cmd.split(" ")
+                    if len(parts) != 2 or parts[1] not in ("plan", "yolo"):
+                        console.print("[red]Usage: /mode <plan|yolo>[/red]")
+                    else:
+                        mode = parts[1]
+                        if mode == "plan":
+                            console.print("[yellow]Mode set to plan (read-only - no file edits or commands)[/yellow]")
+                        else:
+                            console.print("[yellow]Mode set to yolo (auto-approve edits and commands)[/yellow]")
+                    continue
                 elif cmd == "sessions":
                     saved = sessions.list_sessions()
                     if not saved:
@@ -148,6 +160,7 @@ def chat():
                         effort_tier = data.get("effort_tier")
                         cli_override = data.get("cli_override")
                         model_override = data.get("model_override")
+                        mode = data.get("mode", "yolo")
                         usage_log = data.get("usage_log", [])
                         console.print(f"[yellow]Resumed session {session_id}[/yellow]")
                     continue
@@ -202,6 +215,7 @@ def chat():
                             history=history,
                             cli_override=cli_override,
                             model_override=model_override,
+                            mode=mode,
                         )
                         return result, gw.last_usage
 
@@ -225,6 +239,7 @@ def chat():
                         "effort_tier": effort_tier,
                         "cli_override": cli_override,
                         "model_override": model_override,
+                        "mode": mode,
                         "usage_log": usage_log,
                     })
                     continue
@@ -245,6 +260,7 @@ def chat():
                             history=history,
                             cli_override=cli_override,
                             model_override=model_override,
+                            mode=mode,
                         ):
                             response += chunk
                             live.update(Markdown(response))
@@ -259,6 +275,7 @@ def chat():
                         "effort_tier": effort_tier,
                         "cli_override": cli_override,
                         "model_override": model_override,
+                        "mode": mode,
                         "usage_log": usage_log,
                     })
 

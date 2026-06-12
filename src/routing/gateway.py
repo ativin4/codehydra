@@ -41,13 +41,24 @@ class Gateway:
         "codex": "github",
     }
 
-    # Flags that put each CLI in non-interactive, auto-approve-edits agentic mode.
-    AGENTIC_FLAGS = {
-        "claude": ["--permission-mode", "acceptEdits"],
-        # --approval-mode auto_edit hangs headless on the workspace-trust
-        # prompt; --yolo + --skip-trust runs non-interactively.
-        "gemini": ["--yolo", "--skip-trust"],
-        "codex": ["-s", "workspace-write"],
+    # Flags that put each CLI in non-interactive mode, per session /mode.
+    # "yolo": auto-approve edits and commands (default; required for headless
+    # operation since CLIs hang on permission prompts otherwise).
+    # "plan": read-only - the CLI can look around but can't edit files or run
+    # commands. Useful for "what would you do" without touching the workspace.
+    MODE_FLAGS = {
+        "yolo": {
+            "claude": ["--permission-mode", "acceptEdits"],
+            # --approval-mode auto_edit hangs headless on the workspace-trust
+            # prompt; --yolo + --skip-trust runs non-interactively.
+            "gemini": ["--yolo", "--skip-trust"],
+            "codex": ["-s", "workspace-write"],
+        },
+        "plan": {
+            "claude": ["--permission-mode", "plan"],
+            "gemini": ["--approval-mode", "plan", "--skip-trust"],
+            "codex": ["-s", "read-only"],
+        },
     }
 
     # Regexes for extracting token-usage info each CLI prints (best-effort,
@@ -163,7 +174,7 @@ class Gateway:
             "tier": tier,
         }
 
-    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str):
+    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo"):
         """Builds the subprocess argv + env for invoking a CLI with a prompt."""
         cli_path = shutil.which(cli_name)
         if not cli_path:
@@ -188,11 +199,11 @@ class Gateway:
         else:
             cmd = [cli_path, full_prompt]
 
-        # Insert agentic auto-approve flags. codex's go after the "exec"
+        # Insert mode flags (yolo/plan). codex's go after the "exec"
         # subcommand; the others are top-level flags.
         insert_at = 2 if cli_name == "codex" else 1
-        agentic_flags = self.AGENTIC_FLAGS.get(cli_name, [])
-        cmd[insert_at:insert_at] = agentic_flags
+        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS["yolo"]).get(cli_name, [])
+        cmd[insert_at:insert_at] = mode_flags
 
         # Wire up MCP servers declared in .agentrc.toml, if any.
         if self.mcp_servers:
@@ -204,7 +215,7 @@ class Gateway:
                     for key, value in server.items():
                         mcp_flags += ["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"]
                 # -c overrides must precede the prompt positional argument.
-                flag_pos = insert_at + len(agentic_flags)
+                flag_pos = insert_at + len(mode_flags)
                 cmd[flag_pos:flag_pos] = mcp_flags
             # gemini reads mcpServers from .gemini/settings.json automatically.
 
@@ -220,9 +231,9 @@ class Gateway:
         """Diagnostic lines some CLIs (e.g. gemini) print to stdout."""
         return line.startswith("[ExtensionManager]") or "MCP issues detected" in line
 
-    def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None) -> str:
+    def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> str:
         """Executes a local CLI (gemini, codex, claude) and returns its full output."""
-        cmd, env = self._build_cmd(cli_name, messages, model)
+        cmd, env = self._build_cmd(cli_name, messages, model, mode)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
@@ -241,9 +252,9 @@ class Gateway:
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
-    def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None) -> Generator[str, None, None]:
+    def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> Generator[str, None, None]:
         """Executes a local CLI and yields its stdout incrementally, line by line."""
-        cmd, env = self._build_cmd(cli_name, messages, model)
+        cmd, env = self._build_cmd(cli_name, messages, model, mode)
         try:
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1
@@ -311,6 +322,7 @@ class Gateway:
         history: List[Dict[str, str]] = [],
         cli_override: Optional[str] = None,
         model_override: Optional[str] = None,
+        mode: str = "yolo",
     ) -> str:
         """Routes request to appropriate CLI model with fallback logic.
 
@@ -327,7 +339,7 @@ class Gateway:
             if cli_override not in self.cli_default_models:
                 raise Exception(f"Unknown CLI override: {cli_override}")
             model_name = model_override or self.cli_default_models[cli_override][tier]
-            return self._run_cli(cli_override, messages, f"{cli_override}/{model_name}", tier=tier)
+            return self._run_cli(cli_override, messages, f"{cli_override}/{model_name}", tier=tier, mode=mode)
 
         models = self.model_map.get(tier, self.model_map["medium"])
         models = self._prioritize_models(models)
@@ -335,7 +347,7 @@ class Gateway:
         last_exception = None
         for model in models:
             try:
-                return self._run_cli(self._cli_for_model(model), messages, model, tier=tier)
+                return self._run_cli(self._cli_for_model(model), messages, model, tier=tier, mode=mode)
             except Exception as e:
                 last_exception = e
                 error_msg = str(e).split("\n")[0]
@@ -351,6 +363,7 @@ class Gateway:
         history: List[Dict[str, str]] = [],
         cli_override: Optional[str] = None,
         model_override: Optional[str] = None,
+        mode: str = "yolo",
     ) -> Generator[str, None, None]:
         """Like request(), but yields output incrementally as the CLI produces it.
 
@@ -366,7 +379,7 @@ class Gateway:
             if cli_override not in self.cli_default_models:
                 raise Exception(f"Unknown CLI override: {cli_override}")
             model_name = model_override or self.cli_default_models[cli_override][tier]
-            yield from self._run_cli_stream(cli_override, messages, f"{cli_override}/{model_name}", tier=tier)
+            yield from self._run_cli_stream(cli_override, messages, f"{cli_override}/{model_name}", tier=tier, mode=mode)
             return
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
@@ -374,7 +387,7 @@ class Gateway:
         last_exception = None
         for model in models:
             try:
-                gen = self._run_cli_stream(self._cli_for_model(model), messages, model, tier=tier)
+                gen = self._run_cli_stream(self._cli_for_model(model), messages, model, tier=tier, mode=mode)
                 first_chunk = next(gen)
             except StopIteration:
                 continue
