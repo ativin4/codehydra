@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -148,6 +149,35 @@ class Scavenger:
         headers.update(google_hdrs)
 
         return headers
+
+    def get_cli_auth_status(self) -> Dict[str, bool]:
+        """Checks whether each underlying CLI (claude, gemini, codex) is logged in."""
+        status = {"claude": False, "gemini": False, "codex": False}
+
+        if shutil.which("claude"):
+            try:
+                result = subprocess.run(
+                    ["claude", "auth", "status"], capture_output=True, text=True, check=False
+                )
+                data = json.loads(result.stdout)
+                status["claude"] = bool(data.get("loggedIn"))
+            except Exception:
+                pass
+
+        if shutil.which("codex"):
+            try:
+                result = subprocess.run(
+                    ["codex", "login", "status"], capture_output=True, text=True, check=False
+                )
+                combined = (result.stdout + result.stderr).lower()
+                status["codex"] = result.returncode == 0 and "logged in" in combined
+            except Exception:
+                pass
+
+        if shutil.which("gemini"):
+            status["gemini"] = self.get_gemini_cli_token() is not None
+
+        return status
 
     def apply_to_env(self):
         """Applies scavenged credentials to environment variables for tools that expect them."""

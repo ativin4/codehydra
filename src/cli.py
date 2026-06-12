@@ -1,3 +1,4 @@
+import subprocess
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -14,15 +15,46 @@ scanner = Scanner()
 patcher = Patcher()
 compiler = Compiler()
 
+# How to launch the interactive login/auth flow for each underlying CLI.
+LOGIN_COMMANDS = {
+    "claude": ["claude", "auth", "login"],
+    "codex": ["codex", "login"],
+    "gemini": ["gemini"],  # first interactive launch walks through OAuth
+}
+
+
+def _login(cli_name: str) -> None:
+    """Launches a CLI's interactive auth flow, inheriting the current terminal."""
+    cmd = LOGIN_COMMANDS.get(cli_name)
+    if not cmd:
+        console.print(f"[red]Unknown CLI: {cli_name}. Choose from: {', '.join(LOGIN_COMMANDS)}[/red]")
+        return
+
+    console.print(f"[yellow]Launching '{' '.join(cmd)}'... complete the login, then exit back here.[/yellow]")
+    try:
+        subprocess.run(cmd, check=False)
+    except FileNotFoundError:
+        console.print(f"[red]'{cli_name}' CLI not found on PATH.[/red]")
+        return
+
+    # Refresh credential state now that login may have changed it.
+    gateway.active_providers = gateway.scavenger.get_active_providers()
+    gateway.headers = gateway.scavenger.get_all_headers()
+    console.print(f"[green]Refreshed credentials for '{cli_name}'.[/green]")
+
 @app.command()
 def chat():
     """Starts the interactive CodeHydra REPL."""
     active = gateway.scavenger.get_active_providers()
     sub_info = f"Active Subscriptions: {', '.join(active)}" if active else "No active subscriptions found. Using environment API keys."
-    console.print(Panel(
-        f"[bold green]CodeHydra[/bold green] - BYOS Agent Active\n[dim]{sub_info}[/dim]", 
-        subtitle="Type /exit to quit"
-    ))
+
+    auth_status = gateway.scavenger.get_cli_auth_status()
+    unauthenticated = [cli for cli, ok in auth_status.items() if not ok]
+    panel_body = f"[bold green]CodeHydra[/bold green] - BYOS Agent Active\n[dim]{sub_info}[/dim]"
+    if unauthenticated:
+        panel_body += f"\n[yellow]Not logged in: {', '.join(unauthenticated)} - run /login <cli> to authenticate[/yellow]"
+
+    console.print(Panel(panel_body, subtitle="Type /exit to quit"))
     
     # Initialize with workspace context
     context = scanner.get_system_prompt_context()
@@ -52,6 +84,13 @@ def chat():
                 elif cmd == "clear":
                     history = [{"role": "system", "content": system_msg}]
                     console.clear()
+                    continue
+                elif cmd.startswith("login"):
+                    parts = cmd.split(" ")
+                    if len(parts) != 2:
+                        console.print(f"[red]Usage: /login <{'|'.join(LOGIN_COMMANDS)}>[/red]")
+                    else:
+                        _login(parts[1])
                     continue
                 elif cmd.startswith("effort "):
                     tier = cmd.split(" ")[1]
