@@ -71,6 +71,8 @@ def chat():
     )
     history = [{"role": "system", "content": system_msg}]
     effort_tier = None
+    cli_override = None
+    model_override = None
 
     while True:
         try:
@@ -100,6 +102,23 @@ def chat():
                     else:
                         console.print(f"[red]Invalid tier: {tier}[/red]")
                     continue
+                elif cmd.startswith("cli"):
+                    parts = cmd.split(" ")
+                    valid = ["auto", *Gateway.CLI_DEFAULT_MODELS]
+                    if len(parts) != 2 or parts[1] not in valid:
+                        console.print(f"[red]Usage: /cli <{'|'.join(valid)}>[/red]")
+                    else:
+                        cli_override = None if parts[1] == "auto" else parts[1]
+                        console.print(f"[yellow]CLI backend set to {parts[1]}[/yellow]")
+                    continue
+                elif cmd.startswith("model"):
+                    parts = user_input.split(" ", 1)  # preserve model name case
+                    if len(parts) != 2:
+                        console.print("[red]Usage: /model <name|auto>[/red]")
+                    else:
+                        model_override = None if parts[1].lower() == "auto" else parts[1]
+                        console.print(f"[yellow]Model override set to {parts[1]}[/yellow]")
+                    continue
                 else:
                     console.print(f"[red]Unknown command: {cmd}[/red]")
                     continue
@@ -109,7 +128,13 @@ def chat():
             while True: # Self-healing loop
                 with console.status("[bold green]Hydra is working...[/bold green]"):
                     try:
-                        response = gateway.request(current_prompt, tier=effort_tier, history=history)
+                        response = gateway.request(
+                            current_prompt,
+                            tier=effort_tier,
+                            history=history,
+                            cli_override=cli_override,
+                            model_override=model_override,
+                        )
                         history.append({"role": "user", "content": current_prompt})
                         history.append({"role": "assistant", "content": response})
                         

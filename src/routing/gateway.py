@@ -12,6 +12,22 @@ class Gateway:
         "high": ["anthropic/opus", "gemini/gemini-3-pro-preview", "codex/default"],
     }
 
+    # Default model used for each CLI/tier when /cli pins a backend without /model.
+    CLI_DEFAULT_MODELS = {
+        "claude": {"low": "haiku", "medium": "sonnet", "high": "opus"},
+        "gemini": {"low": "gemini-2.5-flash", "medium": "gemini-2.5-pro", "high": "gemini-3-pro-preview"},
+        "codex": {"low": "default", "medium": "default", "high": "default"},
+    }
+
+    # Flags that put each CLI in non-interactive, auto-approve-edits agentic mode.
+    AGENTIC_FLAGS = {
+        "claude": ["--permission-mode", "acceptEdits"],
+        # --approval-mode auto_edit hangs headless on the workspace-trust
+        # prompt; --yolo + --skip-trust runs non-interactively.
+        "gemini": ["--yolo", "--skip-trust"],
+        "codex": ["-s", "workspace-write"],
+    }
+
     def __init__(self):
         self.scavenger = Scavenger()
         self.scavenger.apply_to_env()
@@ -45,6 +61,11 @@ class Gateway:
                 cmd = [cli_path, "-p", full_prompt, "--model", model_name]
             else:
                 cmd = [cli_path, full_prompt]
+
+            # Insert agentic auto-approve flags. codex's go after the "exec"
+            # subcommand; the others are top-level flags.
+            insert_at = 2 if cli_name == "codex" else 1
+            cmd[insert_at:insert_at] = self.AGENTIC_FLAGS.get(cli_name, [])
             
             # Prepare a clean environment for the subprocess
             env = os.environ.copy()
@@ -96,15 +117,33 @@ class Gateway:
         
         return priority_models + other_models
 
-    def request(self, prompt: str, tier: Optional[str] = None, history: List[Dict[str, str]] = []) -> str:
-        """Routes request to appropriate CLI model with fallback logic."""
+    def request(
+        self,
+        prompt: str,
+        tier: Optional[str] = None,
+        history: List[Dict[str, str]] = [],
+        cli_override: Optional[str] = None,
+        model_override: Optional[str] = None,
+    ) -> str:
+        """Routes request to appropriate CLI model with fallback logic.
+
+        If cli_override is set (and not "auto"), that CLI is used directly
+        with no fallback. model_override picks the exact model name for it,
+        defaulting to CLI_DEFAULT_MODELS[cli_override][tier].
+        """
         if tier is None:
             tier = self.classifier.evaluate(prompt)
-        
+
+        messages = history + [{"role": "user", "content": prompt}]
+
+        if cli_override and cli_override != "auto":
+            if cli_override not in self.CLI_DEFAULT_MODELS:
+                raise Exception(f"Unknown CLI override: {cli_override}")
+            model_name = model_override or self.CLI_DEFAULT_MODELS[cli_override][tier]
+            return self._run_cli(cli_override, messages, f"{cli_override}/{model_name}")
+
         models = self.MODEL_MAP.get(tier, self.MODEL_MAP["medium"])
         models = self._prioritize_models(models)
-        
-        messages = history + [{"role": "user", "content": prompt}]
 
         last_exception = None
         for model in models:

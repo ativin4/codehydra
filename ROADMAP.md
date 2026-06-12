@@ -67,3 +67,44 @@ This document outlines the phased development strategy, milestones, and verifica
   * Implement a project-level configuration parser (`.agentrc.toml`) to extract custom build commands (e.g., `npm run build`, `pytest`).
   * Wrap build commands in an isolated `subprocess.run` window.
   * Intercept non-zero exit codes, extract `stderr` diagnostics
+
+---
+
+## 🟦 Phase 4: Claude-Code Feature Parity (Model/Effort/CLI as the only knob)
+**Objective:** CodeHydra should feel identical to driving Claude Code directly — agentic editing, tool use, sessions, streaming, cost tracking — except the user can swap the underlying model, effort tier, and CLI backend per turn.
+
+### Milestone 4.1: Agentic Passthrough + `/cli` Override
+* **Target Files:** `src/routing/gateway.py`, `src/cli.py`
+* **Deliverables:**
+  * Let the chosen backend CLI (`claude`/`gemini`/`codex`) edit files directly in agentic mode (appropriate auto-approve/yolo flags) instead of relying solely on the regex SEARCH/REPLACE patcher.
+  * Add `/cli <claude|gemini|codex|auto>` to pin the backend for the session, mirroring `/effort`.
+  * Add `/model <name>` to pin an explicit model, bypassing `MODEL_MAP`.
+
+### Milestone 4.2: Streaming Output
+* **Target Files:** `src/routing/gateway.py`, `src/cli.py`
+* **Deliverables:**
+  * Replace blocking `subprocess.run` with `subprocess.Popen` + incremental stdout streaming for live token output (parity with Claude Code's live response rendering).
+
+### Milestone 4.3: Session Persistence & `/resume`
+* **Target Files:** `src/routing/session.py` (new), `src/cli.py`
+* **Deliverables:**
+  * Persist conversation history + active model/effort/cli state to `.codehydra/sessions/<id>.json`.
+  * Add `/resume [id]` and `/sessions` (list) commands.
+
+### Milestone 4.4: Usage & Cost Tracking
+* **Target Files:** `src/routing/gateway.py`, `src/cli.py`
+* **Deliverables:**
+  * Parse token/cost info from each CLI's output where available.
+  * Add `/cost` command summarizing spend-equivalent and tier/CLI breakdown for the session.
+
+### Milestone 4.5: MCP Tooling Wired In
+* **Target Files:** `src/mcp/client.py`, `src/routing/gateway.py`, `.agentrc.toml`
+* **Deliverables:**
+  * Load MCP servers declared in `.agentrc.toml`.
+  * Expose their tools to whichever backend CLI supports external tool/MCP configs (pass-through MCP config flags).
+
+### Milestone 4.6: Packaging & Distribution
+* **Target Files:** `pyproject.toml`, `.github/workflows/`
+* **Deliverables:**
+  * `uv tool install codehydra` / `pipx install codehydra` entry point.
+  * Release workflow that builds + publishes to PyPI on tag push.
