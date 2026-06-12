@@ -16,6 +16,7 @@
 - **Sessions**: Conversation history, routing state, and usage are persisted to `.codehydra/sessions/` and resumable across runs.
 - **Usage Tracking**: `/cost` summarizes which CLI/model/tier handled each turn and token counts where reported.
 - **MCP Native**: Declare MCP servers in `.agentrc.toml` and they're wired into whichever backend CLI is active.
+- **Autonomous Subagents**: Every backend CLI is given a built-in `dispatch_agents` tool (mirroring Claude Code's Task tool) so it can fan independent sub-tasks out to parallel CodeHydra-routed agents on its own, mid-turn.
 - **Configurable Routing**: Override CLI priority and model choices per tier in `.agentrc.toml` without touching code.
 
 ## 🚀 Quick Start

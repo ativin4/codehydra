@@ -3,6 +3,7 @@ import shutil
 import os
 import re
 import json
+import sys
 from pathlib import Path
 from typing import Generator, List, Dict, Optional
 from src.auth.scavenger import Scavenger
@@ -64,7 +65,7 @@ class Gateway:
         # Populated after each completed request/request_stream call with
         # {"cli": ..., "model": ..., "tokens": int|None, "tier": ...}.
         self.last_usage: Optional[Dict] = None
-        self.mcp_servers = load_mcp_servers()
+        self.mcp_servers = {**self._builtin_mcp_servers(), **load_mcp_servers()}
         self.claude_mcp_config_path = self._write_mcp_configs()
 
         routing_cfg = load_routing_config()
@@ -79,6 +80,23 @@ class Gateway:
         for cli, tiers in routing_cfg.get("models", {}).items():
             if cli in self.cli_default_models and isinstance(tiers, dict):
                 self.cli_default_models[cli].update(tiers)
+
+    @staticmethod
+    def _builtin_mcp_servers() -> Dict[str, Dict]:
+        """The "codehydra-agents" MCP server (src/mcp/server.py) gives the
+        active CLI a `dispatch_agents` tool to fan out independent sub-tasks
+        to parallel CodeHydra-routed agents, mirroring Claude Code's Task
+        tool. Disabled for sub-agents themselves (CODEHYDRA_ENABLE_SUBAGENTS=0)
+        to avoid unbounded recursive fan-out.
+        """
+        if os.environ.get("CODEHYDRA_ENABLE_SUBAGENTS") == "0":
+            return {}
+        return {
+            "codehydra-agents": {
+                "command": sys.executable,
+                "args": ["-m", "src.mcp.server"],
+            }
+        }
 
     def _write_mcp_configs(self) -> Optional[Path]:
         """Materializes MCP server definitions into the config files/flags
