@@ -48,16 +48,21 @@ class Gateway:
     # commands. Useful for "what would you do" without touching the workspace.
     MODE_FLAGS = {
         "yolo": {
-            "claude": ["--permission-mode", "acceptEdits"],
+            # acceptEdits only auto-approves file edits - Bash and MCP tool
+            # calls still prompt and hang headless. bypassPermissions is the
+            # real full-auto mode.
+            "claude": ["--permission-mode", "bypassPermissions"],
             # --approval-mode auto_edit hangs headless on the workspace-trust
             # prompt; --yolo + --skip-trust runs non-interactively.
             "gemini": ["--yolo", "--skip-trust"],
-            "codex": ["-s", "workspace-write"],
+            # -a never: don't escalate to the user for approval (which would
+            # hang headless) - MCP/exec tool calls run directly.
+            "codex": ["-s", "workspace-write", "-a", "never"],
         },
         "plan": {
             "claude": ["--permission-mode", "plan"],
             "gemini": ["--approval-mode", "plan", "--skip-trust"],
-            "codex": ["-s", "read-only"],
+            "codex": ["-s", "read-only", "-a", "never"],
         },
     }
 
@@ -202,9 +207,9 @@ class Gateway:
         else:
             cmd = [cli_path, full_prompt]
 
-        # Insert mode flags (yolo/plan). codex's go after the "exec"
-        # subcommand; the others are top-level flags.
-        insert_at = 2 if cli_name == "codex" else 1
+        # Insert mode flags (yolo/plan). codex's (-s/-a) are global flags and
+        # must precede the "exec" subcommand; the others are top-level flags.
+        insert_at = 1
         mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS["yolo"]).get(cli_name, [])
         cmd[insert_at:insert_at] = mode_flags
 
@@ -217,8 +222,9 @@ class Gateway:
                 for name, server in self.mcp_servers.items():
                     for key, value in server.items():
                         mcp_flags += ["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"]
-                # -c overrides must precede the prompt positional argument.
-                flag_pos = insert_at + len(mode_flags)
+                # -c overrides must precede the prompt positional argument
+                # but after "exec" (at index 1 + len(mode_flags)).
+                flag_pos = insert_at + len(mode_flags) + 1
                 cmd[flag_pos:flag_pos] = mcp_flags
             # gemini reads mcpServers from .gemini/settings.json automatically.
 
