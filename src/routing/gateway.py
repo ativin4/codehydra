@@ -174,15 +174,45 @@ class Gateway:
         except ValueError:
             return None
 
-    def _record_usage(self, cli_name: str, model: str, err_output: str, tier: Optional[str]) -> None:
+    def _record_usage(self, cli_name: str, model: str, err_output: str, tier: Optional[str], tokens: Optional[int] = None) -> None:
         self.last_usage = {
             "cli": cli_name,
             "model": model,
-            "tokens": self._parse_usage(cli_name, err_output),
+            "tokens": tokens if tokens is not None else self._parse_usage(cli_name, err_output),
             "tier": tier,
         }
 
-    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo"):
+    @staticmethod
+    def _parse_claude_stream_line(line: str) -> tuple:
+        """Returns (text_chunk, total_tokens), either of which may be None."""
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None, None
+        if data.get("type") == "stream_event":
+            delta = data.get("event", {}).get("delta", {})
+            if delta.get("type") == "text_delta":
+                return delta.get("text"), None
+        elif data.get("type") == "result":
+            usage = data.get("usage") or {}
+            total = sum(v for v in usage.values() if isinstance(v, int))
+            return None, total or None
+        return None, None
+
+    @staticmethod
+    def _parse_gemini_stream_line(line: str) -> tuple:
+        """Returns (text_chunk, total_tokens), either of which may be None."""
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None, None
+        if data.get("type") == "message" and data.get("role") == "assistant" and data.get("delta"):
+            return data.get("content"), None
+        elif data.get("type") == "result":
+            return None, (data.get("stats") or {}).get("total_tokens")
+        return None, None
+
+    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo", stream: bool = False):
         """Builds the subprocess argv + env for invoking a CLI with a prompt."""
         cli_path = shutil.which(cli_name)
         if not cli_path:
@@ -198,12 +228,21 @@ class Gateway:
 
         if cli_name == "gemini":
             cmd = [cli_path, "--prompt", full_prompt, "--model", model_name]
+            # Plain text mode buffers the whole response and prints it at
+            # once at the end; stream-json emits incremental text deltas.
+            if stream:
+                cmd += ["--output-format", "stream-json"]
         elif cli_name == "codex":
             # codex exec uses the account's default model; explicit model
             # aliases (e.g. "default") are not valid -m values.
             cmd = [cli_path, "exec", full_prompt]
         elif cli_name == "claude":
             cmd = [cli_path, "-p", full_prompt, "--model", model_name]
+            # Same as gemini: -p alone buffers the full response. stream-json
+            # + --include-partial-messages emits content_block_delta events
+            # with incremental text as the model generates it.
+            if stream:
+                cmd += ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
         else:
             cmd = [cli_path, full_prompt]
 
@@ -262,19 +301,38 @@ class Gateway:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
     def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> Generator[str, None, None]:
-        """Executes a local CLI and yields its stdout incrementally, line by line."""
-        cmd, env = self._build_cmd(cli_name, messages, model, mode)
+        """Executes a local CLI and yields its output incrementally.
+
+        claude/gemini use stream-json so chunks are real token deltas as the
+        model generates them; codex has no equivalent and yields its output
+        (still effectively one chunk near the end) line by line.
+        """
+        stream_json = cli_name in ("claude", "gemini")
+        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json)
+        line_parser = {
+            "claude": self._parse_claude_stream_line,
+            "gemini": self._parse_gemini_stream_line,
+        }.get(cli_name)
+
         try:
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1
             )
             yielded_any = False
+            tokens = None
             try:
                 for line in process.stdout:
                     if self._is_noise_line(line):
                         continue
-                    yielded_any = True
-                    yield line
+                    if line_parser:
+                        chunk, line_tokens = line_parser(line)
+                        if line_tokens is not None:
+                            tokens = line_tokens
+                    else:
+                        chunk = line
+                    if chunk:
+                        yielded_any = True
+                        yield chunk
             finally:
                 process.stdout.close()
                 process.wait()
@@ -285,7 +343,7 @@ class Gateway:
             if not yielded_any:
                 raise Exception(f"{cli_name} CLI returned no usable output. STDERR: {err_output}")
 
-            self._record_usage(cli_name, model, err_output, tier)
+            self._record_usage(cli_name, model, err_output, tier, tokens=tokens)
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
