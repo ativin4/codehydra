@@ -8,7 +8,8 @@
 ## ⚡ Core Superpowers
 
 - **Subscription Scavenging**: Automatically finds and uses tokens from `Claude Code`, `Gemini CLI`, `GitHub Copilot`/`Codex`, and `Google Cloud ADC`.
-- **Multi-CLI Gateway**: Routes each turn to `claude`, `gemini`, or `codex` based on effort tier and which subscriptions are active, with automatic fallback if one fails.
+- **OSS Model Fallback**: Falls back to [Ollama](https://ollama.com) (local or cloud) during rate-limits or refresh windows — set `OLLAMA_HOST` for a remote instance; no subscription gap means no conversation interruption.
+- **Multi-CLI Gateway**: Routes each turn to `claude`, `gemini`, `codex`, or `ollama` based on effort tier and which subscriptions/daemons are active, with automatic fallback if one fails.
 - **Agentic Passthrough**: The chosen CLI edits files directly (auto-approve/yolo mode) — no fragile diff-parsing required.
 - **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`gemini` produce them (via `stream-json`).
 - **Persistent Claude Session**: `claude` runs as a long-lived `stream-json` process, reused across turns - only the first turn pays CLI startup cost, and `/mode`/`/model` changes or a new conversation transparently restart it.
@@ -55,16 +56,38 @@ command = "pytest" # or "npm run build", "go build", etc.
 | Command | Action |
 |---------|--------|
 | `/effort <low\|medium\|high>` | Set the effort tier (affects model choice) |
-| `/cli <auto\|claude\|gemini\|codex>` | Pin the backend CLI for the session |
+| `/cli <auto\|claude\|gemini\|codex\|ollama>` | Pin the backend CLI for the session |
 | `/model <name\|auto>` | Pin an exact model, bypassing the routing table |
 | `/mode <plan\|yolo>` | `plan` = read-only (no edits/commands); `yolo` = auto-approve everything (default) |
-| `/login <claude\|gemini\|codex>` | Launch a backend CLI's interactive auth flow |
+| `/login <claude\|gemini\|codex\|ollama>` | Launch auth flow (or show setup/model info for Ollama) |
 | `/parallel "task 1" "task 2" ...` | Run multiple prompts concurrently (each in its own CLI process), results shown as they complete |
 | `/sessions` | List saved sessions |
 | `/resume [id]` | Resume a session (defaults to the most recent other than current) |
 | `/cost` | Show per-turn CLI/model/tier and token usage for this session |
 | `/clear` | Reset conversation history |
 | `/exit` | Terminate session |
+
+## 🤖 OSS Model Fallback (Ollama)
+
+Use Ollama as a fallback when your paid subscriptions hit rate limits:
+
+**Local**
+```bash
+# Install: https://ollama.com/download
+ollama pull llama3.2        # or mistral, qwen2.5-coder, deepseek-r1, etc.
+# Then in CodeHydra:
+/cli ollama                 # pin to ollama for the session
+/model llama3.2             # pick any pulled model
+/login ollama               # shows available models + usage hint
+```
+
+**Cloud / remote Ollama instance**
+```bash
+export OLLAMA_HOST=https://your-ollama-host
+# CodeHydra detects it automatically on next start (or /login ollama to refresh)
+```
+
+Ollama is detected on startup and added as the last-tier fallback, activating automatically when claude/gemini/codex all fail.
 
 ## ⚙️ Configuration (`.agentrc.toml`)
 

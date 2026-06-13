@@ -1,6 +1,9 @@
+import re
 import shlex
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from rich.console import Group
 from rich.table import Table
@@ -13,32 +16,44 @@ from textual.widgets import Footer, Input, Markdown, Static
 
 from src.routing.claude_session import THINKING_END, THINKING_START
 from src.routing.gateway import Gateway
+from src.routing.oss_provider import OllamaProvider
 from src.routing.session import SessionManager
 from src.tools.compiler import Compiler
 from src.tools.patcher import Patcher
 from src.tools.scanner import Scanner
 
 
+SKILLS_DIR = Path(".codehydra/skills")
+
 SLASH_COMMANDS = [
     "/effort low", "/effort medium", "/effort high",
-    "/cli auto", "/cli claude", "/cli gemini", "/cli codex",
+    "/cli auto", "/cli claude", "/cli gemini", "/cli codex", "/cli ollama",
     "/model auto",
     "/mode plan", "/mode yolo",
-    "/login claude", "/login gemini", "/login codex",
+    "/login claude", "/login gemini", "/login codex", "/login ollama",
     "/parallel",
+    "/compare",
+    "/skills",
     "/sessions", "/resume",
     "/cost", "/clear", "/exit",
 ]
 
 
+def _skill_names() -> list[str]:
+    if not SKILLS_DIR.is_dir():
+        return []
+    return [p.stem for p in SKILLS_DIR.glob("*.md")]
+
+
 class SlashSuggester(Suggester):
-    """Suggests slash commands only when input starts with '/'."""
+    """Suggests slash commands and installed skill names when input starts with '/'."""
 
     async def get_suggestion(self, value: str) -> str | None:
         if not value.startswith("/"):
             return None
         lower = value.lower()
-        for cmd in SLASH_COMMANDS:
+        candidates = SLASH_COMMANDS + [f"/skill {n}" for n in _skill_names()]
+        for cmd in candidates:
             if cmd.startswith(lower) and cmd != lower:
                 return cmd
         return None
@@ -177,9 +192,26 @@ class HydraApp(App):
         })
 
     def _login(self, cli_name: str) -> None:
+        if cli_name == "ollama":
+            self.gateway.refresh_auth()
+            available = OllamaProvider.list_models()
+            if available:
+                lines = [
+                    Text(f"Ollama ready. Models: {', '.join(available)}", style="green"),
+                    Text(f"Use /cli ollama  /model {available[0]}  to start chatting.", style="dim"),
+                ]
+            else:
+                lines = [
+                    Text("Ollama not reachable.", style="yellow"),
+                    Text("  Local:  install from https://ollama.com/download, then ollama pull llama3.2", style="dim"),
+                    Text("  Cloud:  export OLLAMA_HOST=https://your-ollama-host", style="dim"),
+                    Text("  Run /login ollama again after setup.", style="dim"),
+                ]
+            self._add_message(Group(*lines))
+            return
         cmd = Gateway.LOGIN_COMMANDS.get(cli_name)
         if not cmd:
-            self._add_message(Text(f"Unknown CLI: {cli_name}. Choose from: {', '.join(Gateway.LOGIN_COMMANDS)}", style="red"))
+            self._add_message(Text(f"Unknown CLI: {cli_name}. Choose from: {', '.join(Gateway.LOGIN_COMMANDS)}, ollama", style="red"))
             return
 
         self._add_message(Text(f"Launching '{' '.join(cmd)}'... complete the login, then return here.", style="yellow"))
@@ -195,22 +227,48 @@ class HydraApp(App):
 
     # -- input handling ------------------------------------------------
 
+    _AT_FILE_RE = re.compile(r"@([\w./\-]+)")
+
+    def _expand_file_refs(self, text: str) -> tuple[str, list[str]]:
+        """Replaces @path tokens with the file's content inline.
+        Returns (expanded_text, list_of_injected_paths).
+        Unresolvable @tokens are left as-is."""
+        injected = []
+        def replace(m: re.Match) -> str:
+            path = Path(m.group(1))
+            if not path.exists():
+                # try relative to cwd
+                path = Path.cwd() / path
+            if path.is_file():
+                try:
+                    content = path.read_text(errors="replace")
+                    injected.append(str(m.group(1)))
+                    return f"\n\n[File: {m.group(1)}]\n```\n{content}\n```\n"
+                except Exception:
+                    pass
+            return m.group(0)  # leave unknown @tokens unchanged
+        expanded = self._AT_FILE_RE.sub(replace, text)
+        return expanded, injected
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         self.query_one(Input).value = ""
         if not text:
             return
-            
+
         if text.lower() in ("exit", "quit"):
             self.exit()
             return
-            
+
         if text.startswith("/"):
             self._handle_command(text)
             return
-            
+
+        expanded, injected = self._expand_file_refs(text)
         self._add_message(Text(f"> {text}", style="dim"))
-        self._run_prompt(text)
+        if injected:
+            self._add_message(Text(f"  @{' @'.join(injected)}", style="dim cyan"))
+        self._run_prompt(expanded)
 
     def _handle_command(self, user_input: str) -> None:
         cmd = user_input[1:].lower()
@@ -222,8 +280,9 @@ class HydraApp(App):
             self._history_scroll.remove_children()
         elif cmd.startswith("login"):
             parts = cmd.split(" ")
+            valid_logins = list(Gateway.LOGIN_COMMANDS) + ["ollama"]
             if len(parts) != 2:
-                self._add_message(Text(f"Usage: /login <{'|'.join(Gateway.LOGIN_COMMANDS)}>", style="red"))
+                self._add_message(Text(f"Usage: /login <{'|'.join(valid_logins)}>", style="red"))
             else:
                 self._login(parts[1])
         elif cmd.startswith("effort "):
@@ -331,6 +390,50 @@ class HydraApp(App):
                 style="yellow",
             ))
             self._run_parallel(prompts)
+        elif cmd.startswith("compare"):
+            prompt = user_input[len("/compare"):].strip()
+            if not prompt:
+                self._add_message(Text('Usage: /compare <prompt>', style="red"))
+                return
+            active = [cli for cli, ok in self.gateway.cli_auth_status.items() if ok]
+            if len(active) < 2:
+                self._add_message(Text("Need at least 2 active CLIs to compare.", style="red"))
+                return
+            self._add_message(Text(
+                f"Comparing across {len(active)} CLIs: {', '.join(active)}...",
+                style="yellow",
+            ))
+            self._run_compare(prompt, active)
+        elif cmd == "skills":
+            names = _skill_names()
+            if not names:
+                self._add_message(Text(
+                    f"No skills found. Create .md files in {SKILLS_DIR}/",
+                    style="dim",
+                ))
+            else:
+                self._add_message(Group(
+                    Text(f"Available skills ({SKILLS_DIR}):", style="bold"),
+                    *[Text(f"  /skill {n}", style="cyan") for n in names],
+                ))
+        elif cmd.startswith("skill"):
+            parts = user_input.split(None, 2)  # /skill <name> [prompt]
+            if len(parts) < 2:
+                self._add_message(Text("Usage: /skill <name> [prompt]", style="red"))
+                return
+            skill_name = parts[1]
+            skill_prompt = parts[2].strip() if len(parts) > 2 else ""
+            skill_file = SKILLS_DIR / f"{skill_name}.md"
+            if not skill_file.exists():
+                names = _skill_names()
+                hint = f"  Available: {', '.join(names)}" if names else f"  No skills in {SKILLS_DIR}/"
+                self._add_message(Text(f"Skill '{skill_name}' not found.{hint}", style="red"))
+                return
+            skill_content = skill_file.read_text().strip()
+            prompt = f"{skill_content}\n\n{skill_prompt}".strip() if skill_prompt else skill_content
+            self._add_message(Text(f"> /skill {skill_name}" + (f" {skill_prompt}" if skill_prompt else ""), style="dim"))
+            self._add_message(Text(f"  skill: {skill_name}", style="dim cyan"))
+            self._run_prompt(prompt)
         else:
             self._add_message(Text(f"Unknown command: {cmd}", style="red"))
 
@@ -430,6 +533,49 @@ class HydraApp(App):
                     self.call_from_thread(self._add_message, Text(tag, style="dim"))
                 self.history.append({"role": "user", "content": prompt})
                 self.history.append({"role": "assistant", "content": result})
+                if usage:
+                    self.usage_log.append(usage)
+
+        self._save_session()
+
+    @work(thread=True, group="compare")
+    def _run_compare(self, prompt: str, cli_names: list[str]) -> None:
+        """Sends the same prompt to every active CLI in parallel and renders
+        each response as a labelled block so the user can compare answers."""
+        parent_auth = self.gateway.cli_auth_status
+
+        def run_one(cli: str):
+            gw = Gateway()
+            gw.cli_auth_status = parent_auth
+            t0 = time.monotonic()
+            result = gw.request(
+                prompt,
+                tier=self.effort_tier,
+                history=self.history,
+                cli_override=cli,
+                mode=self.mode,
+            )
+            elapsed = time.monotonic() - t0
+            return result, gw.last_usage, elapsed
+
+        with ThreadPoolExecutor(max_workers=len(cli_names)) as executor:
+            futures = {executor.submit(run_one, cli): cli for cli in cli_names}
+            for future in as_completed(futures):
+                cli = futures[future]
+                try:
+                    result, usage, elapsed = future.result()
+                except Exception as e:
+                    self.call_from_thread(
+                        self._add_message,
+                        Text(f"❌ {cli}: {e}", style="red"),
+                    )
+                    continue
+
+                model_tag = usage["model"].split("/")[-1] if usage else cli
+                header = Text(f"── {cli} / {model_tag}  ({elapsed:.1f}s) ──", style="bold cyan")
+                self.call_from_thread(self._add_message, header)
+                md = Markdown(result)
+                self.call_from_thread(self._history_scroll.mount, md)
                 if usage:
                     self.usage_log.append(usage)
 

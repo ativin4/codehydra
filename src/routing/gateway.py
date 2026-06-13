@@ -10,6 +10,7 @@ from src.auth.scavenger import Scavenger
 from src.routing.classifier import Classifier
 from src.routing.config import load_routing_config
 from src.routing.claude_session import ClaudeSession
+from src.routing.oss_provider import OllamaProvider
 from src.mcp.config import load_mcp_servers
 
 class Gateway:
@@ -20,9 +21,9 @@ class Gateway:
     # updating as new generations ship — override via [routing.model_map]
     # in .agentrc.toml instead of editing this code.
     MODEL_MAP = {
-        "low": ["anthropic/haiku", "codex/default", "gemini/gemini-2.5-flash"],
-        "medium": ["anthropic/sonnet", "codex/default", "gemini/gemini-2.5-pro"],
-        "high": ["anthropic/opus", "codex/default", "gemini/gemini-3-pro-preview"],
+        "low": ["anthropic/haiku", "codex/default", "gemini/gemini-2.5-flash", "ollama/llama3.2"],
+        "medium": ["anthropic/sonnet", "codex/default", "gemini/gemini-2.5-pro", "ollama/llama3.2"],
+        "high": ["anthropic/opus", "codex/default", "gemini/gemini-3-pro-preview", "ollama/llama3.3"],
     }
 
     # Default model used for each CLI/tier when /cli pins a backend without
@@ -31,6 +32,7 @@ class Gateway:
         "claude": {"low": "haiku", "medium": "sonnet", "high": "opus"},
         "gemini": {"low": "gemini-2.5-flash", "medium": "gemini-2.5-pro", "high": "gemini-3-pro-preview"},
         "codex": {"low": "default", "medium": "default", "high": "default"},
+        "ollama": {"low": "llama3.2", "medium": "llama3.2", "high": "llama3.3"},
     }
 
     # Maps a model's "<provider>/" prefix to the scavenger provider name used
@@ -40,6 +42,7 @@ class Gateway:
         "gemini": "google",
         "github": "github",
         "codex": "github",
+        "ollama": "ollama",
     }
 
     # Flags that put each CLI in non-interactive mode, per session /mode.
@@ -91,6 +94,7 @@ class Gateway:
         # (e.g. claude's keychain entry) or conflate unrelated tokens (e.g.
         # a `gh` CLI login surfaces as "github" but doesn't mean codex is set up).
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
+        self.cli_auth_status["ollama"] = OllamaProvider.is_available()
         # Persistent `claude -p --input-format stream-json` process (see
         # claude_session.py). _claude_history_len is the count of non-system
         # messages sent so far; used to detect new/resumed conversations that
@@ -366,6 +370,7 @@ class Gateway:
         """Re-reads all credentials after a login flow completes."""
         self.active_providers = self.scavenger.get_active_providers()
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
+        self.cli_auth_status["ollama"] = OllamaProvider.is_available()
         self.headers = self.scavenger.get_all_headers()
 
     def _resolve_cli_and_model(
@@ -518,7 +523,23 @@ class Gateway:
             return "codex"
         elif model.startswith("anthropic/"):
             return "claude"
+        elif model.startswith("ollama/"):
+            return "ollama"
         raise Exception(f"Unsupported model provider in: {model}")
+
+    def _run_oss_stream(self, model: str, messages: List[Dict], tier: Optional[str] = None) -> Generator[str, None, None]:
+        """Streams from an Ollama server (local or remote via OLLAMA_HOST)."""
+        model_name = model.split("/")[-1]
+        yielded_any = False
+        try:
+            for chunk in OllamaProvider.generate(model_name, messages):
+                yielded_any = True
+                yield chunk
+        except Exception as e:
+            raise Exception(f"ollama execution error: {e}")
+        if not yielded_any:
+            raise Exception("ollama returned no output.")
+        self._record_usage("ollama", model, "", tier)
 
     def request(
         self,
@@ -543,6 +564,8 @@ class Gateway:
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
             cli_name, model = resolved
+            if cli_name == "ollama":
+                return "".join(self._run_oss_stream(model, messages, tier=tier))
             return self._run_cli(cli_name, messages, model, tier=tier, mode=mode)
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
@@ -550,7 +573,10 @@ class Gateway:
         last_exception = None
         for model in models:
             try:
-                return self._run_cli(self._cli_for_model(model), messages, model, tier=tier, mode=mode)
+                cli = self._cli_for_model(model)
+                if cli == "ollama":
+                    return "".join(self._run_oss_stream(model, messages, tier=tier))
+                return self._run_cli(cli, messages, model, tier=tier, mode=mode)
             except Exception as e:
                 last_exception = e
                 error_msg = str(e).split("\n")[0]
@@ -581,7 +607,10 @@ class Gateway:
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
             cli_name, model = resolved
-            yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode)
+            if cli_name == "ollama":
+                yield from self._run_oss_stream(model, messages, tier=tier)
+            else:
+                yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode)
             return
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
@@ -589,7 +618,12 @@ class Gateway:
         last_exception = None
         for model in models:
             try:
-                gen = self._run_cli_stream(self._cli_for_model(model), messages, model, tier=tier, mode=mode)
+                cli = self._cli_for_model(model)
+                gen = (
+                    self._run_oss_stream(model, messages, tier=tier)
+                    if cli == "ollama"
+                    else self._run_cli_stream(cli, messages, model, tier=tier, mode=mode)
+                )
                 first_chunk = next(gen)
             except StopIteration:
                 continue
