@@ -20,6 +20,7 @@ class SessionManager:
 
     def save(self, session_id: str, state: Dict[str, Any]) -> None:
         payload = {**state, "updated_at": time.time()}
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
         with open(self._path(session_id), "w") as f:
             json.dump(payload, f, indent=2)
 

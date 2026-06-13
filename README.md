@@ -11,6 +11,7 @@
 - **Multi-CLI Gateway**: Routes each turn to `claude`, `gemini`, or `codex` based on effort tier and which subscriptions are active, with automatic fallback if one fails.
 - **Agentic Passthrough**: The chosen CLI edits files directly (auto-approve/yolo mode) — no fragile diff-parsing required.
 - **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`gemini` produce them (via `stream-json`).
+- **Persistent Claude Session**: `claude` runs as a long-lived `stream-json` process, reused across turns - only the first turn pays CLI startup cost, and `/mode`/`/model` changes or a new conversation transparently restart it.
 - **Claude Code-style TUI**: A scrollable history pane with a pinned input box at the bottom, built with `textual`.
 - **Self-Healing Loop**: If the agent makes a change that breaks your build, it reads the `stderr` and fixes it automatically.
 - **Workspace-Aware**: Injects a compact AST-tree map of your entire project into the LLM context.

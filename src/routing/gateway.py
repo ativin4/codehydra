@@ -9,6 +9,7 @@ from typing import Generator, List, Dict, Optional
 from src.auth.scavenger import Scavenger
 from src.routing.classifier import Classifier
 from src.routing.config import load_routing_config
+from src.routing.claude_session import ClaudeSession
 from src.mcp.config import load_mcp_servers
 
 class Gateway:
@@ -19,9 +20,9 @@ class Gateway:
     # updating as new generations ship — override via [routing.model_map]
     # in .agentrc.toml instead of editing this code.
     MODEL_MAP = {
-        "low": ["gemini/gemini-2.5-flash", "anthropic/haiku"],
-        "medium": ["anthropic/sonnet", "gemini/gemini-2.5-pro", "codex/default"],
-        "high": ["anthropic/opus", "gemini/gemini-3-pro-preview", "codex/default"],
+        "low": ["anthropic/haiku", "codex/default", "gemini/gemini-2.5-flash"],
+        "medium": ["anthropic/sonnet", "codex/default", "gemini/gemini-2.5-pro"],
+        "high": ["anthropic/opus", "codex/default", "gemini/gemini-3-pro-preview"],
     }
 
     # Default model used for each CLI/tier when /cli pins a backend without
@@ -77,6 +78,19 @@ class Gateway:
         self.scavenger.apply_to_env()
         self.headers = self.scavenger.get_all_headers()
         self.active_providers = self.scavenger.get_active_providers()
+        # Per-CLI logged-in status (claude/gemini/codex), used to prioritize
+        # routing - more reliable than active_providers, which only reflects
+        # scavenged token files and can miss CLIs that manage their own auth
+        # (e.g. claude's keychain entry) or conflate unrelated tokens (e.g.
+        # a `gh` CLI login surfaces as "github" but doesn't mean codex is set up).
+        self.cli_auth_status = self.scavenger.get_cli_auth_status()
+        # Persistent `claude -p --input-format stream-json` process (see
+        # claude_session.py) - reused across turns so only the first turn
+        # in a conversation pays CLI startup cost. _claude_sent_turns tracks
+        # how many user turns have been sent to it, to detect when `messages`
+        # is a continuation vs. a new/resumed conversation.
+        self._claude_session: Optional["ClaudeSession"] = None
+        self._claude_sent_turns = 0
         self.classifier = Classifier()
         # Populated after each completed request/request_stream call with
         # {"cli": ..., "model": ..., "tokens": int|None, "tier": ...}.
@@ -183,23 +197,6 @@ class Gateway:
         }
 
     @staticmethod
-    def _parse_claude_stream_line(line: str) -> tuple:
-        """Returns (text_chunk, total_tokens), either of which may be None."""
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            return None, None
-        if data.get("type") == "stream_event":
-            delta = data.get("event", {}).get("delta", {})
-            if delta.get("type") == "text_delta":
-                return delta.get("text"), None
-        elif data.get("type") == "result":
-            usage = data.get("usage") or {}
-            total = sum(v for v in usage.values() if isinstance(v, int))
-            return None, total or None
-        return None, None
-
-    @staticmethod
     def _parse_gemini_stream_line(line: str) -> tuple:
         """Returns (text_chunk, total_tokens), either of which may be None."""
         try:
@@ -238,11 +235,6 @@ class Gateway:
             cmd = [cli_path, "exec", full_prompt]
         elif cli_name == "claude":
             cmd = [cli_path, "-p", full_prompt, "--model", model_name]
-            # Same as gemini: -p alone buffers the full response. stream-json
-            # + --include-partial-messages emits content_block_delta events
-            # with incremental text as the model generates it.
-            if stream:
-                cmd += ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
         else:
             cmd = [cli_path, full_prompt]
 
@@ -300,6 +292,62 @@ class Gateway:
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
+    def _run_claude_persistent_stream(self, messages: List[Dict[str, str]], model: str, tier: Optional[str], mode: str) -> Generator[str, None, None]:
+        """Sends one turn through a persistent claude session (claude_session.py),
+        starting/restarting it if the conversation doesn't match what it has
+        already seen (new conversation, /resume, or /mode//model change)."""
+        model_name = model.split("/")[-1]
+        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS["yolo"])["claude"]
+        user_turns = [m for m in messages if m["role"] != "system"]
+        if not user_turns:
+            raise Exception("claude CLI execution error: no user message to send")
+
+        is_continuation = (
+            self._claude_session is not None
+            and self._claude_session.alive()
+            and self._claude_session.matches(model_name, mode_flags)
+            and len(user_turns) == self._claude_sent_turns * 2 + 1
+        )
+
+        if not is_continuation:
+            if self._claude_session is not None:
+                self._claude_session.close()
+            system_prompt = next((m["content"] for m in messages if m["role"] == "system"), "")
+            self._claude_session = ClaudeSession(
+                model_name, mode_flags, system_prompt=system_prompt,
+                mcp_config_path=self.claude_mcp_config_path,
+            )
+            self._claude_sent_turns = 0
+
+        tokens = None
+        yielded_any = False
+        try:
+            from src.routing.claude_session import THINKING_START, THINKING_END
+            sentinels = {THINKING_START, THINKING_END}
+            for chunk, line_tokens in self._claude_session.send(user_turns[-1]["content"]):
+                if line_tokens is not None:
+                    tokens = line_tokens
+                if chunk:
+                    if chunk not in sentinels:
+                        yielded_any = True
+                    yield chunk
+        except Exception as e:
+            self._claude_session.close()
+            self._claude_session = None
+            self._claude_sent_turns = 0
+            raise Exception(f"claude CLI execution error: {e}")
+
+        self._claude_sent_turns = (len(user_turns) + 1) // 2
+        if not yielded_any:
+            raise Exception("claude CLI returned no usable output.")
+        self._record_usage("claude", model, "", tier, tokens=tokens)
+
+    def close(self) -> None:
+        """Releases any persistent CLI sessions. Call on app exit."""
+        if self._claude_session is not None:
+            self._claude_session.close()
+            self._claude_session = None
+
     def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> Generator[str, None, None]:
         """Executes a local CLI and yields its output incrementally.
 
@@ -307,43 +355,97 @@ class Gateway:
         model generates them; codex has no equivalent and yields its output
         (still effectively one chunk near the end) line by line.
         """
-        stream_json = cli_name in ("claude", "gemini")
+        if cli_name == "claude":
+            yield from self._run_claude_persistent_stream(messages, model, tier, mode)
+            return
+
+        stream_json = cli_name == "gemini"
         cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json)
-        line_parser = {
-            "claude": self._parse_claude_stream_line,
-            "gemini": self._parse_gemini_stream_line,
-        }.get(cli_name)
+        line_parser = self._parse_gemini_stream_line if cli_name == "gemini" else None
 
         try:
+            import pty
+            import selectors
+            
+            master_fd, slave_fd = pty.openpty()
+            
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+                close_fds=True
             )
+            os.close(slave_fd)
+            
+            sel = selectors.DefaultSelector()
+            sel.register(master_fd, selectors.EVENT_READ)
+            
             yielded_any = False
             tokens = None
+            buffer = b""
+            
             try:
-                for line in process.stdout:
-                    if self._is_noise_line(line):
-                        continue
-                    if line_parser:
-                        chunk, line_tokens = line_parser(line)
-                        if line_tokens is not None:
-                            tokens = line_tokens
-                    else:
-                        chunk = line
-                    if chunk:
-                        yielded_any = True
-                        yield chunk
+                # Keep reading as long as the process is alive OR there is data to read
+                while True:
+                    # select with a timeout so we can check process.poll()
+                    ready = sel.select(0.1)
+                    if ready:
+                        try:
+                            data = os.read(master_fd, 1024)
+                            if not data:
+                                break  # EOF reached
+                            buffer += data
+                            
+                            while b'\n' in buffer:
+                                line_bytes, buffer = buffer.split(b'\n', 1)
+                                line = line_bytes.decode('utf-8', errors='replace').strip()
+                                
+                                if not line or self._is_noise_line(line):
+                                    continue
+                                    
+                                if line_parser:
+                                    chunk, line_tokens = line_parser(line)
+                                    if line_tokens is not None:
+                                        tokens = line_tokens
+                                else:
+                                    chunk = line
+                                    
+                                if chunk:
+                                    yielded_any = True
+                                    yield chunk
+                                    
+                        except OSError:
+                            break # Master fd closed or EOF
+                    elif process.poll() is not None:
+                        break # Process finished and no more data
+                
+                # Flush remaining buffer if it doesn't end in newline
+                if buffer:
+                    line = buffer.decode('utf-8', errors='replace').strip()
+                    if line and not self._is_noise_line(line):
+                        if line_parser:
+                            chunk, line_tokens = line_parser(line)
+                            if line_tokens is not None:
+                                tokens = line_tokens
+                        else:
+                            chunk = line
+                        if chunk:
+                            yielded_any = True
+                            yield chunk
+
             finally:
-                process.stdout.close()
+                sel.close()
+                os.close(master_fd)
                 process.wait()
 
-            err_output = process.stderr.read().strip()
             if process.returncode != 0 and not yielded_any:
-                raise Exception(f"{cli_name} CLI failed: {err_output}")
+                raise Exception(f"{cli_name} CLI failed")
             if not yielded_any:
-                raise Exception(f"{cli_name} CLI returned no usable output. STDERR: {err_output}")
+                raise Exception(f"{cli_name} CLI returned no usable output.")
 
-            self._record_usage(cli_name, model, err_output, tier, tokens=tokens)
+            self._record_usage(cli_name, model, "", tier, tokens=tokens)
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
@@ -363,8 +465,7 @@ class Gateway:
         other_models = []
 
         for model in models:
-            scav_provider = self.PROVIDER_MAP.get(model.split("/")[0])
-            if scav_provider in self.active_providers or (scav_provider == "google" and "gemini_cli" in self.active_providers):
+            if self.cli_auth_status.get(self._cli_for_model(model)):
                 priority_models.append(model)
             else:
                 other_models.append(model)

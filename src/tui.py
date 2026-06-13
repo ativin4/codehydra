@@ -11,6 +11,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Footer, Input, Static
 
+from src.routing.claude_session import THINKING_END, THINKING_START
 from src.routing.gateway import Gateway
 from src.routing.session import SessionManager
 from src.tools.compiler import Compiler
@@ -71,6 +72,9 @@ class HydraApp(App):
         self.usage_log = []
         self.session_id = self.sessions.new_session_id()
 
+    def on_unmount(self) -> None:
+        self.gateway.close()
+
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="history")
         yield Static(id="status")
@@ -78,12 +82,12 @@ class HydraApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        active = self.gateway.scavenger.get_active_providers()
+        auth_status = self.gateway.cli_auth_status
+        ready = [cli for cli, ok in auth_status.items() if ok]
         sub_info = (
-            f"Active subscriptions: {', '.join(active)}"
-            if active else "No active subscriptions found. Using environment API keys."
+            f"Ready CLIs: {', '.join(ready)}"
+            if ready else "No CLIs are logged in. Run /login <cli> to authenticate."
         )
-        auth_status = self.gateway.scavenger.get_cli_auth_status()
         unauthenticated = [cli for cli, ok in auth_status.items() if not ok]
         lines = [Text("CodeHydra - BYOS Agent Active", style="bold green"), Text(sub_info)]
         if unauthenticated:
@@ -147,6 +151,7 @@ class HydraApp(App):
                 return
 
         self.gateway.active_providers = self.gateway.scavenger.get_active_providers()
+        self.gateway.cli_auth_status = self.gateway.scavenger.get_cli_auth_status()
         self.gateway.headers = self.gateway.scavenger.get_all_headers()
         self._add_message(Text(f"Refreshed credentials for '{cli_name}'.", style="green"))
 
@@ -157,9 +162,15 @@ class HydraApp(App):
         self.query_one(Input).value = ""
         if not text:
             return
+            
+        if text.lower() in ("exit", "quit"):
+            self.exit()
+            return
+            
         if text.startswith("/"):
             self._handle_command(text)
             return
+            
         self._add_message(Text(f"\U0001f464 You: {text}"))
         self._run_prompt(text)
 
@@ -287,12 +298,28 @@ class HydraApp(App):
 
     # -- workers ---------------------------------------------------------
 
+    def _render_streaming(self, label: str, thinking: str, response: str):
+        """Builds the renderable for a streaming update.
+
+        Thinking text (model reasoning) is shown dim/italic above the answer
+        so the user can watch the model reason in real-time without it being
+        confused with the final reply.
+        """
+        parts = [Text(label, style="bold magenta")]
+        if thinking:
+            parts.append(Text(thinking, style="dim italic"))
+        if response:
+            parts.append(Markdown(response))
+        return Group(*parts)
+
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
         current_prompt = prompt
         while True:
             widget = self.call_from_thread(self._add_message, Text("\U0001f916 Hydra:"))
+            thinking = ""
             response = ""
+            in_thinking = False
             try:
                 for chunk in self.gateway.request_stream(
                     current_prompt,
@@ -302,8 +329,20 @@ class HydraApp(App):
                     model_override=self.model_override,
                     mode=self.mode,
                 ):
-                    response += chunk
-                    self.call_from_thread(widget.update, Group(Text("\U0001f916 Hydra:", style="bold magenta"), Markdown(response)))
+                    if chunk == THINKING_START:
+                        in_thinking = True
+                        continue
+                    if chunk == THINKING_END:
+                        in_thinking = False
+                        continue
+                    if in_thinking:
+                        thinking += chunk
+                    else:
+                        response += chunk
+                    self.call_from_thread(
+                        widget.update,
+                        self._render_streaming("\U0001f916 Hydra:", thinking, response),
+                    )
                     self.call_from_thread(self.query_one("#history", VerticalScroll).scroll_end, animate=False)
             except Exception as e:
                 self.call_from_thread(widget.update, Text(f"Error: {e}", style="red"))
