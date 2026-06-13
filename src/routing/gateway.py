@@ -266,6 +266,12 @@ class Gateway:
 
         return cmd, env
 
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]|\x1b\].*?\x07|\x1b[@-Z\\-_]")
+
+    @classmethod
+    def _strip_ansi(cls, text: str) -> str:
+        return cls._ANSI_RE.sub("", text)
+
     @staticmethod
     def _is_noise_line(line: str) -> bool:
         """Diagnostic lines some CLIs (e.g. gemini) print to stdout."""
@@ -283,6 +289,7 @@ class Gateway:
             if result.returncode != 0 and not output:
                 raise Exception(f"{cli_name} CLI failed: {err_output}")
 
+            output = self._strip_ansi(output)
             cleaned_lines = [line for line in output.split("\n") if not self._is_noise_line(line)]
             final_output = "\n".join(cleaned_lines).strip()
             if not final_output:
@@ -400,11 +407,11 @@ class Gateway:
                             
                             while b'\n' in buffer:
                                 line_bytes, buffer = buffer.split(b'\n', 1)
-                                line = line_bytes.decode('utf-8', errors='replace').strip()
-                                
+                                line = self._strip_ansi(line_bytes.decode('utf-8', errors='replace').strip())
+
                                 if not line or self._is_noise_line(line):
                                     continue
-                                    
+
                                 if line_parser:
                                     chunk, line_tokens = line_parser(line)
                                     if line_tokens is not None:

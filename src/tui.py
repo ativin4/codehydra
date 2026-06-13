@@ -9,6 +9,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
+from textual.suggester import Suggester
 from textual.widgets import Footer, Input, Static
 
 from src.routing.claude_session import THINKING_END, THINKING_START
@@ -24,6 +25,31 @@ LOGIN_COMMANDS = {
     "codex": ["codex", "login"],
     "gemini": ["gemini"],  # first interactive launch walks through OAuth
 }
+
+
+SLASH_COMMANDS = [
+    "/effort low", "/effort medium", "/effort high",
+    "/cli auto", "/cli claude", "/cli gemini", "/cli codex",
+    "/model auto",
+    "/mode plan", "/mode yolo",
+    "/login claude", "/login gemini", "/login codex",
+    "/parallel",
+    "/sessions", "/resume",
+    "/cost", "/clear", "/exit",
+]
+
+
+class SlashSuggester(Suggester):
+    """Suggests slash commands only when input starts with '/'."""
+
+    async def get_suggestion(self, value: str) -> str | None:
+        if not value.startswith("/"):
+            return None
+        lower = value.lower()
+        for cmd in SLASH_COMMANDS:
+            if cmd.startswith(lower) and cmd != lower:
+                return cmd
+        return None
 
 
 class HydraApp(App):
@@ -78,7 +104,7 @@ class HydraApp(App):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="history")
         yield Static(id="status")
-        yield Input(placeholder="Type a message or /command...")
+        yield Input(placeholder="Type a message or /command...", suggester=SlashSuggester())
         yield Footer()
 
     def on_mount(self) -> None:
@@ -346,7 +372,7 @@ class HydraApp(App):
 
             response = response.strip()
             usage = self.gateway.last_usage
-            tag = f"[{usage['cli']}/{usage['model']}]" if usage else ""
+            tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
             self.call_from_thread(widget.update, self._render_streaming(tag, "", response))
 
             self.history.append({"role": "user", "content": current_prompt})
@@ -392,7 +418,7 @@ class HydraApp(App):
                     self.call_from_thread(self._add_message, Text(f"❌ {prompt[:60]}: {e}", style="red"))
                     continue
 
-                tag = f"[{usage['cli']}/{usage['model']}]" if usage else ""
+                tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
                 self.call_from_thread(
                     self._add_message,
                     Group(Text(f"> {prompt[:60]}", style="dim"), Markdown(result), Text(tag, style="dim")),
