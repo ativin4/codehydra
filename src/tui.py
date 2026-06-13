@@ -121,7 +121,7 @@ class HydraApp(App):
         history.remove_children()
         for msg in self.history:
             if msg["role"] == "user":
-                history.mount(Static(Text(f"\U0001f464 You: {msg['content']}")))
+                history.mount(Static(Text(f"> {msg['content']}", style="dim")))
             elif msg["role"] == "assistant":
                 history.mount(Static(Markdown(msg["content"])))
         history.scroll_end(animate=False)
@@ -171,7 +171,7 @@ class HydraApp(App):
             self._handle_command(text)
             return
             
-        self._add_message(Text(f"\U0001f464 You: {text}"))
+        self._add_message(Text(f"> {text}", style="dim"))
         self._run_prompt(text)
 
     def _handle_command(self, user_input: str) -> None:
@@ -298,25 +298,21 @@ class HydraApp(App):
 
     # -- workers ---------------------------------------------------------
 
-    def _render_streaming(self, label: str, thinking: str, response: str):
-        """Builds the renderable for a streaming update.
-
-        Thinking text (model reasoning) is shown dim/italic above the answer
-        so the user can watch the model reason in real-time without it being
-        confused with the final reply.
-        """
-        parts = [Text(label, style="bold magenta")]
+    def _render_streaming(self, tag: str, thinking: str, response: str):
+        parts = []
         if thinking:
             parts.append(Text(thinking, style="dim italic"))
         if response:
             parts.append(Markdown(response))
-        return Group(*parts)
+        if tag:
+            parts.append(Text(tag, style="dim"))
+        return Group(*parts) if parts else Text("")
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
         current_prompt = prompt
         while True:
-            widget = self.call_from_thread(self._add_message, Text("\U0001f916 Hydra:"))
+            widget = self.call_from_thread(self._add_message, Text(""))
             thinking = ""
             response = ""
             in_thinking = False
@@ -341,7 +337,7 @@ class HydraApp(App):
                         response += chunk
                     self.call_from_thread(
                         widget.update,
-                        self._render_streaming("\U0001f916 Hydra:", thinking, response),
+                        self._render_streaming("", thinking, response),
                     )
                     self.call_from_thread(self.query_one("#history", VerticalScroll).scroll_end, animate=False)
             except Exception as e:
@@ -350,8 +346,8 @@ class HydraApp(App):
 
             response = response.strip()
             usage = self.gateway.last_usage
-            label = f"\U0001f916 Hydra ({usage['cli']}/{usage['model']}):" if usage else "\U0001f916 Hydra:"
-            self.call_from_thread(widget.update, Group(Text(label, style="bold magenta"), Markdown(response)))
+            tag = f"[{usage['cli']}/{usage['model']}]" if usage else ""
+            self.call_from_thread(widget.update, self._render_streaming(tag, "", response))
 
             self.history.append({"role": "user", "content": current_prompt})
             self.history.append({"role": "assistant", "content": response})
@@ -396,9 +392,10 @@ class HydraApp(App):
                     self.call_from_thread(self._add_message, Text(f"❌ {prompt[:60]}: {e}", style="red"))
                     continue
 
+                tag = f"[{usage['cli']}/{usage['model']}]" if usage else ""
                 self.call_from_thread(
                     self._add_message,
-                    Group(Text(f"\U0001f916 {prompt[:60]}", style="bold magenta"), Markdown(result)),
+                    Group(Text(f"> {prompt[:60]}", style="dim"), Markdown(result), Text(tag, style="dim")),
                 )
                 self.history.append({"role": "user", "content": prompt})
                 self.history.append({"role": "assistant", "content": result})
