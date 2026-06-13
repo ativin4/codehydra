@@ -73,6 +73,13 @@ class Gateway:
         "codex": re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE),
     }
 
+    # Commands to launch each CLI's interactive auth flow.
+    LOGIN_COMMANDS = {
+        "claude": ["claude", "auth", "login"],
+        "codex": ["codex", "login"],
+        "gemini": ["gemini"],  # first interactive launch walks through OAuth
+    }
+
     def __init__(self):
         self.scavenger = Scavenger()
         self.scavenger.apply_to_env()
@@ -85,12 +92,11 @@ class Gateway:
         # a `gh` CLI login surfaces as "github" but doesn't mean codex is set up).
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
         # Persistent `claude -p --input-format stream-json` process (see
-        # claude_session.py) - reused across turns so only the first turn
-        # in a conversation pays CLI startup cost. _claude_sent_turns tracks
-        # how many user turns have been sent to it, to detect when `messages`
-        # is a continuation vs. a new/resumed conversation.
+        # claude_session.py). _claude_history_len is the count of non-system
+        # messages sent so far; used to detect new/resumed conversations that
+        # need a fresh process instead of a continuation.
         self._claude_session: Optional["ClaudeSession"] = None
-        self._claude_sent_turns = 0
+        self._claude_history_len = 0
         self.classifier = Classifier()
         # Populated after each completed request/request_stream call with
         # {"cli": ..., "model": ..., "tokens": int|None, "tier": ...}.
@@ -309,11 +315,18 @@ class Gateway:
         if not user_turns:
             raise Exception("claude CLI execution error: no user message to send")
 
+        # A continuation means the session has already seen all prior messages
+        # and just needs the new last user turn. We check the total non-system
+        # message count: if it equals what we last recorded + 1 new user turn
+        # and +1 assistant turn for each prior round (i.e. len == prev + 2 or
+        # len == 1 for the very first turn), it's a continuation.
+        # Simpler: _claude_history_len stores len(user_turns) after each send,
+        # so a continuation is exactly len(user_turns) == _claude_history_len + 1.
         is_continuation = (
             self._claude_session is not None
             and self._claude_session.alive()
             and self._claude_session.matches(model_name, mode_flags)
-            and len(user_turns) == self._claude_sent_turns * 2 + 1
+            and len(user_turns) == self._claude_history_len + 1
         )
 
         if not is_continuation:
@@ -324,7 +337,7 @@ class Gateway:
                 model_name, mode_flags, system_prompt=system_prompt,
                 mcp_config_path=self.claude_mcp_config_path,
             )
-            self._claude_sent_turns = 0
+            self._claude_history_len = 0
 
         tokens = None
         yielded_any = False
@@ -341,13 +354,30 @@ class Gateway:
         except Exception as e:
             self._claude_session.close()
             self._claude_session = None
-            self._claude_sent_turns = 0
+            self._claude_history_len = 0
             raise Exception(f"claude CLI execution error: {e}")
 
-        self._claude_sent_turns = (len(user_turns) + 1) // 2
+        self._claude_history_len = len(user_turns)
         if not yielded_any:
             raise Exception("claude CLI returned no usable output.")
         self._record_usage("claude", model, "", tier, tokens=tokens)
+
+    def refresh_auth(self) -> None:
+        """Re-reads all credentials after a login flow completes."""
+        self.active_providers = self.scavenger.get_active_providers()
+        self.cli_auth_status = self.scavenger.get_cli_auth_status()
+        self.headers = self.scavenger.get_all_headers()
+
+    def _resolve_cli_and_model(
+        self, cli_override: Optional[str], model_override: Optional[str], tier: str
+    ) -> Optional[tuple]:
+        """Returns (cli_name, full_model_str) when cli_override is set, else None."""
+        if not cli_override or cli_override == "auto":
+            return None
+        if cli_override not in self.cli_default_models:
+            raise Exception(f"Unknown CLI override: {cli_override}")
+        model_name = model_override or self.cli_default_models[cli_override][tier]
+        return cli_override, f"{cli_override}/{model_name}"
 
     def close(self) -> None:
         """Releases any persistent CLI sessions. Call on app exit."""
@@ -510,14 +540,12 @@ class Gateway:
 
         messages = history + [{"role": "user", "content": prompt}]
 
-        if cli_override and cli_override != "auto":
-            if cli_override not in self.cli_default_models:
-                raise Exception(f"Unknown CLI override: {cli_override}")
-            model_name = model_override or self.cli_default_models[cli_override][tier]
-            return self._run_cli(cli_override, messages, f"{cli_override}/{model_name}", tier=tier, mode=mode)
+        resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
+        if resolved:
+            cli_name, model = resolved
+            return self._run_cli(cli_name, messages, model, tier=tier, mode=mode)
 
-        models = self.model_map.get(tier, self.model_map["medium"])
-        models = self._prioritize_models(models)
+        models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
 
         last_exception = None
         for model in models:
@@ -550,11 +578,10 @@ class Gateway:
 
         messages = history + [{"role": "user", "content": prompt}]
 
-        if cli_override and cli_override != "auto":
-            if cli_override not in self.cli_default_models:
-                raise Exception(f"Unknown CLI override: {cli_override}")
-            model_name = model_override or self.cli_default_models[cli_override][tier]
-            yield from self._run_cli_stream(cli_override, messages, f"{cli_override}/{model_name}", tier=tier, mode=mode)
+        resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
+        if resolved:
+            cli_name, model = resolved
+            yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode)
             return
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))

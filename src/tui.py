@@ -18,13 +18,6 @@ from src.tools.compiler import Compiler
 from src.tools.patcher import Patcher
 from src.tools.scanner import Scanner
 
-# How to launch the interactive login/auth flow for each underlying CLI.
-LOGIN_COMMANDS = {
-    "claude": ["claude", "auth", "login"],
-    "codex": ["codex", "login"],
-    "gemini": ["gemini"],  # first interactive launch walks through OAuth
-}
-
 
 SLASH_COMMANDS = [
     "/effort low", "/effort medium", "/effort high",
@@ -115,6 +108,7 @@ class HydraApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._history_scroll = self.query_one("#history", VerticalScroll)
         auth_status = self.gateway.cli_auth_status
         ready = [cli for cli, ok in auth_status.items() if ok]
         sub_info = (
@@ -144,7 +138,7 @@ class HydraApp(App):
 
     def _add_message(self, renderable) -> Static:
         widget = Static(renderable)
-        history = self.query_one("#history", VerticalScroll)
+        history = self._history_scroll
         history.mount(widget)
         history.scroll_end(animate=False)
         return widget
@@ -154,7 +148,7 @@ class HydraApp(App):
         Both are returned so the worker thread can update them incrementally.
         Markdown widget supports mouse selection; thinking stays as Static (dim).
         """
-        history = self.query_one("#history", VerticalScroll)
+        history = self._history_scroll
         thinking = Static("", classes="thinking")
         md = Markdown("")
         history.mount(thinking)
@@ -163,7 +157,7 @@ class HydraApp(App):
         return thinking, md
 
     def _render_history(self) -> None:
-        history = self.query_one("#history", VerticalScroll)
+        history = self._history_scroll
         history.remove_children()
         for msg in self.history:
             if msg["role"] == "user":
@@ -183,9 +177,9 @@ class HydraApp(App):
         })
 
     def _login(self, cli_name: str) -> None:
-        cmd = LOGIN_COMMANDS.get(cli_name)
+        cmd = Gateway.LOGIN_COMMANDS.get(cli_name)
         if not cmd:
-            self._add_message(Text(f"Unknown CLI: {cli_name}. Choose from: {', '.join(LOGIN_COMMANDS)}", style="red"))
+            self._add_message(Text(f"Unknown CLI: {cli_name}. Choose from: {', '.join(Gateway.LOGIN_COMMANDS)}", style="red"))
             return
 
         self._add_message(Text(f"Launching '{' '.join(cmd)}'... complete the login, then return here.", style="yellow"))
@@ -196,9 +190,7 @@ class HydraApp(App):
                 self._add_message(Text(f"'{cli_name}' CLI not found on PATH.", style="red"))
                 return
 
-        self.gateway.active_providers = self.gateway.scavenger.get_active_providers()
-        self.gateway.cli_auth_status = self.gateway.scavenger.get_cli_auth_status()
-        self.gateway.headers = self.gateway.scavenger.get_all_headers()
+        self.gateway.refresh_auth()
         self._add_message(Text(f"Refreshed credentials for '{cli_name}'.", style="green"))
 
     # -- input handling ------------------------------------------------
@@ -227,11 +219,11 @@ class HydraApp(App):
             self.exit()
         elif cmd == "clear":
             self.history = [{"role": "system", "content": self.system_msg}]
-            self.query_one("#history", VerticalScroll).remove_children()
+            self._history_scroll.remove_children()
         elif cmd.startswith("login"):
             parts = cmd.split(" ")
             if len(parts) != 2:
-                self._add_message(Text(f"Usage: /login <{'|'.join(LOGIN_COMMANDS)}>", style="red"))
+                self._add_message(Text(f"Usage: /login <{'|'.join(Gateway.LOGIN_COMMANDS)}>", style="red"))
             else:
                 self._login(parts[1])
         elif cmd.startswith("effort "):
@@ -346,7 +338,6 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
-        current_prompt = prompt
         while True:
             thinking_w, md_w = self.call_from_thread(self._add_response_turn)
             thinking = ""
@@ -354,7 +345,7 @@ class HydraApp(App):
             in_thinking = False
             try:
                 for chunk in self.gateway.request_stream(
-                    current_prompt,
+                    prompt,
                     tier=self.effort_tier,
                     history=self.history,
                     cli_override=self.cli_override,
@@ -373,7 +364,7 @@ class HydraApp(App):
                     else:
                         response += chunk
                         self.call_from_thread(md_w.update, response)
-                    self.call_from_thread(self.query_one("#history", VerticalScroll).scroll_end, animate=False)
+                    self.call_from_thread(self._history_scroll.scroll_end, animate=False)
             except Exception as e:
                 self.call_from_thread(thinking_w.remove)
                 self.call_from_thread(md_w.update, f"**Error:** {e}")
@@ -385,7 +376,7 @@ class HydraApp(App):
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]"
                 self.call_from_thread(self._add_message, Text(tag, style="dim"))
 
-            self.history.append({"role": "user", "content": current_prompt})
+            self.history.append({"role": "user", "content": prompt})
             self.history.append({"role": "assistant", "content": response})
             if usage:
                 self.usage_log.append(usage)
@@ -402,12 +393,15 @@ class HydraApp(App):
                 return
 
             self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra...", style="bold red"))
-            current_prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
+            prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
+        parent_auth = self.gateway.cli_auth_status
+
         def run_task(prompt: str):
             gw = Gateway()
+            gw.cli_auth_status = parent_auth  # skip redundant CLI auth subprocesses
             result = gw.request(
                 prompt,
                 tier=self.effort_tier,
@@ -429,10 +423,9 @@ class HydraApp(App):
                     continue
 
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
-                history = self.query_one("#history", VerticalScroll)
                 self.call_from_thread(self._add_message, Text(f"> {prompt[:60]}", style="dim"))
                 md = Markdown(result)
-                self.call_from_thread(history.mount, md)
+                self.call_from_thread(self._history_scroll.mount, md)
                 if tag:
                     self.call_from_thread(self._add_message, Text(tag, style="dim"))
                 self.history.append({"role": "user", "content": prompt})

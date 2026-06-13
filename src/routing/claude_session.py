@@ -67,8 +67,7 @@ class ClaudeSession:
         self._proc.stdin.write(json.dumps(msg) + "\n")
         self._proc.stdin.flush()
 
-        _emitted_thinking = False
-        _emitted_sentinel = False
+        thinking_open = False
         while True:
             line = self._lines.get()
             if line is None:
@@ -87,15 +86,15 @@ class ClaudeSession:
                 # Yield thinking deltas so the user sees real-time reasoning.
                 # Extended-thinking models emit many thinking_delta events then
                 # a single text_delta — without streaming thinking, the UI
-                # appears frozen. THINKING_END sentinel marks the boundary.
+                # appears frozen. THINKING_START/END sentinels mark the boundary.
                 if delta.get("type") == "thinking_delta" and delta.get("thinking"):
-                    if not _emitted_thinking:
-                        _emitted_thinking = True
+                    if not thinking_open:
+                        thinking_open = True
                         yield THINKING_START, None
                     yield delta["thinking"], None
                 elif delta.get("type") == "text_delta" and delta.get("text"):
-                    if _emitted_thinking and not _emitted_sentinel:
-                        _emitted_sentinel = True
+                    if thinking_open:
+                        thinking_open = False
                         yield THINKING_END, None
                     yield delta["text"], None
             elif data.get("type") == "result":
