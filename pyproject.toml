@@ -9,6 +9,7 @@ dependencies = [
     "mcp>=1.27.2",
     "pathspec>=1.1.1",
     "rich>=15.0.0",
+    "textual>=8.2.7",
     "typer>=0.26.7",
 ]
 

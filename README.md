@@ -10,7 +10,8 @@
 - **Subscription Scavenging**: Automatically finds and uses tokens from `Claude Code`, `Gemini CLI`, `GitHub Copilot`/`Codex`, and `Google Cloud ADC`.
 - **Multi-CLI Gateway**: Routes each turn to `claude`, `gemini`, or `codex` based on effort tier and which subscriptions are active, with automatic fallback if one fails.
 - **Agentic Passthrough**: The chosen CLI edits files directly (auto-approve/yolo mode) — no fragile diff-parsing required.
-- **Live Streaming**: Responses render incrementally as the underlying CLI produces them.
+- **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`gemini` produce them (via `stream-json`).
+- **Claude Code-style TUI**: A scrollable history pane with a pinned input box at the bottom, built with `textual`.
 - **Self-Healing Loop**: If the agent makes a change that breaks your build, it reads the `stderr` and fixes it automatically.
 - **Workspace-Aware**: Injects a compact AST-tree map of your entire project into the LLM context.
 - **Sessions**: Conversation history, routing state, and usage are persisted to `.codehydra/sessions/` and resumable across runs.
@@ -37,7 +38,7 @@ uv sync
 
 ### 3. Usage
 ```bash
-# Start the interactive REPL
+# Start the interactive TUI
 uv run python3 main.py
 ```
 
