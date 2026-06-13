@@ -3,14 +3,13 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rich.console import Group
-from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.suggester import Suggester
-from textual.widgets import Footer, Input, Static
+from textual.widgets import Footer, Input, Markdown, Static
 
 from src.routing.claude_session import THINKING_END, THINKING_START
 from src.routing.gateway import Gateway
@@ -64,6 +63,14 @@ class HydraApp(App):
         height: 1;
         background: $boost;
         color: $text-muted;
+        padding: 0 1;
+    }
+    .thinking {
+        color: $text-muted;
+        text-style: italic;
+        padding: 0 1;
+    }
+    Markdown {
         padding: 0 1;
     }
     """
@@ -142,6 +149,19 @@ class HydraApp(App):
         history.scroll_end(animate=False)
         return widget
 
+    def _add_response_turn(self):
+        """Mounts (thinking_static, markdown_widget) for a streaming response.
+        Both are returned so the worker thread can update them incrementally.
+        Markdown widget supports mouse selection; thinking stays as Static (dim).
+        """
+        history = self.query_one("#history", VerticalScroll)
+        thinking = Static("", classes="thinking")
+        md = Markdown("")
+        history.mount(thinking)
+        history.mount(md)
+        history.scroll_end(animate=False)
+        return thinking, md
+
     def _render_history(self) -> None:
         history = self.query_one("#history", VerticalScroll)
         history.remove_children()
@@ -149,7 +169,7 @@ class HydraApp(App):
             if msg["role"] == "user":
                 history.mount(Static(Text(f"> {msg['content']}", style="dim")))
             elif msg["role"] == "assistant":
-                history.mount(Static(Markdown(msg["content"])))
+                history.mount(Markdown(msg["content"]))
         history.scroll_end(animate=False)
 
     def _save_session(self) -> None:
@@ -324,21 +344,11 @@ class HydraApp(App):
 
     # -- workers ---------------------------------------------------------
 
-    def _render_streaming(self, tag: str, thinking: str, response: str):
-        parts = []
-        if thinking:
-            parts.append(Text(thinking, style="dim italic"))
-        if response:
-            parts.append(Markdown(response))
-        if tag:
-            parts.append(Text(tag, style="dim"))
-        return Group(*parts) if parts else Text("")
-
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
         current_prompt = prompt
         while True:
-            widget = self.call_from_thread(self._add_message, Text(""))
+            thinking_w, md_w = self.call_from_thread(self._add_response_turn)
             thinking = ""
             response = ""
             in_thinking = False
@@ -359,21 +369,21 @@ class HydraApp(App):
                         continue
                     if in_thinking:
                         thinking += chunk
+                        self.call_from_thread(thinking_w.update, thinking)
                     else:
                         response += chunk
-                    self.call_from_thread(
-                        widget.update,
-                        self._render_streaming("", thinking, response),
-                    )
+                        self.call_from_thread(md_w.update, response)
                     self.call_from_thread(self.query_one("#history", VerticalScroll).scroll_end, animate=False)
             except Exception as e:
-                self.call_from_thread(widget.update, Text(f"Error: {e}", style="red"))
+                self.call_from_thread(thinking_w.remove)
+                self.call_from_thread(md_w.update, f"**Error:** {e}")
                 return
 
             response = response.strip()
             usage = self.gateway.last_usage
-            tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
-            self.call_from_thread(widget.update, self._render_streaming(tag, "", response))
+            if usage:
+                tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]"
+                self.call_from_thread(self._add_message, Text(tag, style="dim"))
 
             self.history.append({"role": "user", "content": current_prompt})
             self.history.append({"role": "assistant", "content": response})
@@ -419,10 +429,12 @@ class HydraApp(App):
                     continue
 
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
-                self.call_from_thread(
-                    self._add_message,
-                    Group(Text(f"> {prompt[:60]}", style="dim"), Markdown(result), Text(tag, style="dim")),
-                )
+                history = self.query_one("#history", VerticalScroll)
+                self.call_from_thread(self._add_message, Text(f"> {prompt[:60]}", style="dim"))
+                md = Markdown(result)
+                self.call_from_thread(history.mount, md)
+                if tag:
+                    self.call_from_thread(self._add_message, Text(tag, style="dim"))
                 self.history.append({"role": "user", "content": prompt})
                 self.history.append({"role": "assistant", "content": result})
                 if usage:
