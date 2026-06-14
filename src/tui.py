@@ -449,6 +449,16 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
+        turns = [m for m in self.history if m["role"] != "system"]
+        history_chars = sum(len(m["content"]) for m in turns)
+        if history_chars > self._AUTO_COMPACT_CHARS:
+            self.call_from_thread(self._add_message, Text("↩ Auto-compacting history…", style="dim yellow"))
+            try:
+                msg = self._do_compact()
+                if msg:
+                    self.call_from_thread(self._add_message, Text(f"↩ {msg}", style="dim yellow"))
+            except Exception as e:
+                self.call_from_thread(self._add_message, Text(f"Auto-compact failed: {e}", style="red"))
         while True:
             thinking_w, md_w = self.call_from_thread(self._add_response_turn)
             thinking = ""
@@ -507,13 +517,15 @@ class HydraApp(App):
             self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra...", style="bold red"))
             prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
 
-    @work(thread=True, exclusive=True, group="prompt")
-    def _run_compact(self) -> None:
+    # Auto-compact when non-system history exceeds this many characters.
+    _AUTO_COMPACT_CHARS = 60_000
+
+    def _do_compact(self) -> str | None:
+        """Compact history in-place. Returns a status string, or None if nothing to compact.
+        Must be called from a worker thread (calls gateway.request which blocks)."""
         turns = [m for m in self.history if m["role"] != "system"]
         if len(turns) < 6:
-            self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
-            return
-        # Keep last 4 messages (2 exchanges) verbatim; summarize everything before.
+            return None
         to_summarize = turns[:-4]
         recent = turns[-4:]
         conv_text = "\n\n".join(
@@ -525,27 +537,33 @@ class HydraApp(App):
             "and any unresolved issues. Be specific — mention filenames and function names.\n\n"
             f"{conv_text}"
         )
-        self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
-        try:
-            summary = self.gateway.request(
-                summary_prompt,
-                tier="low",
-                history=[],
-                cli_override=self.cli_override,
-                mode="plan",
-            )
-        except Exception as e:
-            self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
-            return
+        summary = self.gateway.request(
+            summary_prompt,
+            tier="low",
+            history=[],
+            cli_override=self.cli_override,
+            mode="plan",
+        )
         system = [m for m in self.history if m["role"] == "system"]
         self.history = system + [
             {"role": "assistant", "content": f"[Compacted history — {len(to_summarize)//2} earlier turns]\n{summary.strip()}"}
         ] + recent
         self._save_session()
-        self.call_from_thread(self._add_message, Text(
-            f"Compacted {len(to_summarize)//2} turns → summary + {len(recent)//2} recent turns kept",
-            style="green",
-        ))
+        return f"Compacted {len(to_summarize)//2} turns → summary + {len(recent)//2} recent turns kept"
+
+    @work(thread=True, exclusive=True, group="prompt")
+    def _run_compact(self) -> None:
+        turns = [m for m in self.history if m["role"] != "system"]
+        if len(turns) < 6:
+            self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
+            return
+        self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
+        try:
+            msg = self._do_compact()
+        except Exception as e:
+            self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
+            return
+        self.call_from_thread(self._add_message, Text(msg or "Nothing to compact.", style="green"))
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
