@@ -4,6 +4,7 @@ import os
 import re
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Generator, List, Dict, Optional
 from src.auth.scavenger import Scavenger
@@ -105,6 +106,10 @@ class Gateway:
         # Populated after each completed request/request_stream call with
         # {"cli": ..., "model": ..., "tokens": int|None, "tier": ...}.
         self.last_usage: Optional[Dict] = None
+        # cli_name -> unix timestamp until which that CLI is rate-limited.
+        # Populated when a request fails with a rate-limit error; checked in
+        # _prioritize_models to skip the CLI until its window resets.
+        self._rate_limited_until: Dict[str, float] = {}
         self.mcp_servers = {**self._builtin_mcp_servers(), **load_mcp_servers()}
         self.claude_mcp_config_path = self._write_mcp_configs()
 
@@ -166,8 +171,16 @@ class Gateway:
                     settings = json.load(f)
             except Exception:
                 settings = {}
-        # Merge per-server so we don't clobber servers the user added by hand.
-        settings.setdefault("mcpServers", {}).update(self.mcp_servers)
+        # Gemini loads MCP servers synchronously at startup — each server spawns
+        # a subprocess before the first token is sent, adding ~3-5s per server.
+        # We skip injecting codehydra-tools into gemini to keep its latency low;
+        # claude and codex get MCP support via --mcp-config / -c flags instead.
+        user_mcp = {k: v for k, v in settings.get("mcpServers", {}).items()
+                    if k not in self.mcp_servers}
+        if user_mcp:
+            settings["mcpServers"] = user_mcp
+        else:
+            settings.pop("mcpServers", None)
         self._write_json_if_changed(gemini_settings_path, settings)
 
         return claude_config_path
@@ -278,9 +291,29 @@ class Gateway:
 
     _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]|\x1b\].*?\x07|\x1b[@-Z\\-_]")
 
+    # Patterns that indicate a subscription rate-limit (not a bug/auth failure).
+    _RATE_LIMIT_RE = re.compile(
+        r"rate.?limit|too many requests|quota exceeded|429|overloaded|"
+        r"capacity|try again|please wait|usage limit",
+        re.IGNORECASE,
+    )
+    # Default cooldown when no retry-after header is available.
+    _RATE_LIMIT_COOLDOWN = 60  # seconds
+
     @classmethod
     def _strip_ansi(cls, text: str) -> str:
         return cls._ANSI_RE.sub("", text)
+
+    def _mark_rate_limited(self, cli_name: str, seconds: int = _RATE_LIMIT_COOLDOWN) -> None:
+        self._rate_limited_until[cli_name] = time.time() + seconds
+
+    def is_rate_limited(self, cli_name: str) -> bool:
+        return time.time() < self._rate_limited_until.get(cli_name, 0)
+
+    def rate_limit_resets_in(self, cli_name: str) -> Optional[int]:
+        """Seconds until cooldown expires, or None if not rate-limited."""
+        remaining = self._rate_limited_until.get(cli_name, 0) - time.time()
+        return int(remaining) + 1 if remaining > 0 else None
 
     @staticmethod
     def _is_noise_line(line: str) -> bool:
@@ -505,14 +538,20 @@ class Gateway:
 
         priority_models = []
         other_models = []
+        rate_limited = []
 
         for model in models:
-            if self.cli_auth_status.get(self._cli_for_model(model)):
+            cli = self._cli_for_model(model)
+            if self.is_rate_limited(cli):
+                rate_limited.append(model)
+            elif self.cli_auth_status.get(cli):
                 priority_models.append(model)
             else:
                 other_models.append(model)
 
-        return priority_models + other_models
+        # Rate-limited CLIs go last — they may have recovered by the time
+        # all higher-priority options are exhausted.
+        return priority_models + other_models + rate_limited
 
     @staticmethod
     def _cli_for_model(model: str) -> str:
@@ -578,6 +617,8 @@ class Gateway:
                     return "".join(self._run_oss_stream(model, messages, tier=tier))
                 return self._run_cli(cli, messages, model, tier=tier, mode=mode)
             except Exception as e:
+                if self._RATE_LIMIT_RE.search(str(e)):
+                    self._mark_rate_limited(self._cli_for_model(model))
                 last_exception = e
                 error_msg = str(e).split("\n")[0]
                 print(f"Error on {model}: {error_msg}")
@@ -628,6 +669,8 @@ class Gateway:
             except StopIteration:
                 continue
             except Exception as e:
+                if self._RATE_LIMIT_RE.search(str(e)):
+                    self._mark_rate_limited(self._cli_for_model(model))
                 last_exception = e
                 error_msg = str(e).split("\n")[0]
                 print(f"Error on {model}: {error_msg}")

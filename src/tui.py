@@ -147,8 +147,14 @@ class HydraApp(App):
         cli = self.cli_override or "auto"
         model = self.model_override or "auto"
         tier = self.effort_tier or "auto"
+        rl_parts = []
+        for name in ("claude", "gemini", "codex", "ollama"):
+            secs = self.gateway.rate_limit_resets_in(name)
+            if secs is not None:
+                rl_parts.append(f"{name}⏳{secs}s")
+        rl_str = f"  rate-limited: {' '.join(rl_parts)}" if rl_parts else ""
         self.query_one("#status", Static).update(
-            f"cli={cli}  model={model}  effort={tier}  mode={self.mode}  session={self.session_id}"
+            f"cli={cli}  model={model}  effort={tier}  mode={self.mode}  session={self.session_id}{rl_str}"
         )
 
     def _add_message(self, renderable) -> Static:
@@ -478,6 +484,7 @@ class HydraApp(App):
             if usage:
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]"
                 self.call_from_thread(self._add_message, Text(tag, style="dim"))
+            self.call_from_thread(self._update_status)
 
             self.history.append({"role": "user", "content": prompt})
             self.history.append({"role": "assistant", "content": response})
