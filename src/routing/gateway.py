@@ -72,6 +72,10 @@ class Gateway:
     }
 
     # Regexes for extracting token-usage info each CLI prints (best-effort,
+    # Max non-system messages passed to one-shot CLIs (gemini/codex/ollama).
+    # Claude manages its own context via persistent session.
+    _CONTEXT_WINDOW = 30
+
     # only some CLIs report this).
     USAGE_PATTERNS = {
         "codex": re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE),
@@ -245,6 +249,16 @@ class Gateway:
         cli_path = shutil.which(cli_name)
         if not cli_path:
             raise Exception(f"'{cli_name}' CLI not found on PATH. Install it and ensure it's accessible.")
+
+        # Claude has a persistent session that tracks its own context; one-shot
+        # CLIs get the full history concatenated as a string, so cap it to avoid
+        # unbounded prompt growth across long conversations.
+        if cli_name != "claude":
+            system = [m for m in messages if m["role"] == "system"]
+            turns = [m for m in messages if m["role"] != "system"]
+            if len(turns) > self._CONTEXT_WINDOW:
+                turns = turns[-self._CONTEXT_WINDOW:]
+            messages = system + turns
 
         full_prompt = ""
         for msg in messages:

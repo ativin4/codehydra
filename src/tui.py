@@ -35,7 +35,7 @@ SLASH_COMMANDS = [
     "/compare",
     "/skills",
     "/sessions", "/resume",
-    "/cost", "/clear", "/exit",
+    "/cost", "/clear", "/compact", "/exit",
 ]
 
 
@@ -284,6 +284,8 @@ class HydraApp(App):
         elif cmd == "clear":
             self.history = [{"role": "system", "content": self.system_msg}]
             self._history_scroll.remove_children()
+        elif cmd == "compact":
+            self._run_compact()
         elif cmd.startswith("login"):
             parts = cmd.split(" ")
             valid_logins = list(Gateway.LOGIN_COMMANDS) + ["ollama"]
@@ -504,6 +506,46 @@ class HydraApp(App):
 
             self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra...", style="bold red"))
             prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
+
+    @work(thread=True, exclusive=True, group="prompt")
+    def _run_compact(self) -> None:
+        turns = [m for m in self.history if m["role"] != "system"]
+        if len(turns) < 6:
+            self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
+            return
+        # Keep last 4 messages (2 exchanges) verbatim; summarize everything before.
+        to_summarize = turns[:-4]
+        recent = turns[-4:]
+        conv_text = "\n\n".join(
+            f"{m['role'].upper()}: {m['content'][:1000]}" for m in to_summarize
+        )
+        summary_prompt = (
+            "Summarize the conversation below in 5-8 concise bullet points. "
+            "Capture: key decisions, files changed, bugs fixed, commands run, "
+            "and any unresolved issues. Be specific — mention filenames and function names.\n\n"
+            f"{conv_text}"
+        )
+        self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
+        try:
+            summary = self.gateway.request(
+                summary_prompt,
+                tier="low",
+                history=[],
+                cli_override=self.cli_override,
+                mode="plan",
+            )
+        except Exception as e:
+            self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
+            return
+        system = [m for m in self.history if m["role"] == "system"]
+        self.history = system + [
+            {"role": "assistant", "content": f"[Compacted history — {len(to_summarize)//2} earlier turns]\n{summary.strip()}"}
+        ] + recent
+        self._save_session()
+        self.call_from_thread(self._add_message, Text(
+            f"Compacted {len(to_summarize)//2} turns → summary + {len(recent)//2} recent turns kept",
+            style="green",
+        ))
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
