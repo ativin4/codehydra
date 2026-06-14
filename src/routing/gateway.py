@@ -181,6 +181,14 @@ class Gateway:
             settings["mcpServers"] = user_mcp
         else:
             settings.pop("mcpServers", None)
+        # Disable blocking startup checks. Key names from official settings schema:
+        # general.enableAutoUpdate blocks on version check; ui.renderProcess
+        # starts an Ink render subprocess we don't need in headless mode.
+        settings.setdefault("general", {}).update({
+            "enableAutoUpdate": False,
+            "enableAutoUpdateNotification": False,
+        })
+        settings.setdefault("ui", {})["renderProcess"] = False
         self._write_json_if_changed(gemini_settings_path, settings)
 
         return claude_config_path
@@ -286,6 +294,9 @@ class Gateway:
         env = os.environ.copy()
         if "GOOGLE_CLOUD_PROJECT" in env:
             del env["GOOGLE_CLOUD_PROJECT"]
+        if cli_name == "gemini":
+            # Bypass folder trust prompt in headless mode (replaces --skip-trust flag).
+            env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 
         return cmd, env
 
