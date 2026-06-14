@@ -88,7 +88,7 @@ class HydraApp(App):
     }
     """
 
-    BINDINGS = [("ctrl+q", "quit", "Quit")]
+    BINDINGS = [("ctrl+c", "quit", "Quit")]
 
     def __init__(self):
         super().__init__()
@@ -120,6 +120,7 @@ class HydraApp(App):
         self.session_id = self.sessions.new_session_id()
 
     def on_unmount(self) -> None:
+        self._save_session()
         self.gateway.close()
 
     def compose(self) -> ComposeResult:
