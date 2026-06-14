@@ -21,6 +21,7 @@ from src.routing.session import SessionManager
 from src.tools.compiler import Compiler
 from src.tools.patcher import Patcher
 from src.tools.scanner import Scanner
+from src.tools.websearch import fetch_url, format_results, search
 
 
 SKILLS_DIR = Path(".codehydra/skills")
@@ -38,6 +39,7 @@ SLASH_COMMANDS = [
     "/sessions", "/resume",
     "/cost", "/clear", "/compact", "/exit",
     "/memory", "/remember", "/forget",
+    "/search",
 ]
 
 
@@ -245,23 +247,30 @@ class HydraApp(App):
 
     # -- input handling ------------------------------------------------
 
-    _AT_FILE_RE = re.compile(r"@([\w./\-]+)")
+    _AT_FILE_RE = re.compile(r"@(https?://[^\s]+|[\w./\-]+)")
 
     def _expand_file_refs(self, text: str) -> tuple[str, list[str]]:
-        """Replaces @path tokens with the file's content inline.
-        Returns (expanded_text, list_of_injected_paths).
+        """Replaces @path and @https://url tokens with content inline.
+        Returns (expanded_text, list_of_injected_tokens).
         Unresolvable @tokens are left as-is."""
         injected = []
         def replace(m: re.Match) -> str:
-            path = Path(m.group(1))
+            token = m.group(1)
+            if token.startswith("http://") or token.startswith("https://"):
+                try:
+                    content = fetch_url(token)
+                    injected.append(token)
+                    return f"\n\n[URL: {token}]\n{content}\n"
+                except Exception:
+                    return m.group(0)
+            path = Path(token)
             if not path.exists():
-                # try relative to cwd
-                path = Path.cwd() / path
+                path = Path.cwd() / token
             if path.is_file():
                 try:
                     content = path.read_text(errors="replace")
-                    injected.append(str(m.group(1)))
-                    return f"\n\n[File: {m.group(1)}]\n```\n{content}\n```\n"
+                    injected.append(token)
+                    return f"\n\n[File: {token}]\n```\n{content}\n```\n"
                 except Exception:
                     pass
             return m.group(0)  # leave unknown @tokens unchanged
@@ -454,6 +463,12 @@ class HydraApp(App):
             self._add_message(Text(f"> /skill {skill_name}" + (f" {skill_prompt}" if skill_prompt else ""), style="dim"))
             self._add_message(Text(f"  skill: {skill_name}", style="dim cyan"))
             self._run_prompt(prompt)
+        elif cmd.startswith("search ") or cmd == "search":
+            query = user_input[len("/search"):].strip()
+            if not query:
+                self._add_message(Text("Usage: /search <query>", style="red"))
+            else:
+                self._run_search(query)
         elif cmd == "memory":
             if not MEMORY_FILE.exists() or not MEMORY_FILE.read_text().strip():
                 self._add_message(Text("No project memory yet. Use /remember <fact>", style="dim"))
@@ -602,6 +617,23 @@ class HydraApp(App):
             self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
             return
         self.call_from_thread(self._add_message, Text(msg or "Nothing to compact.", style="green"))
+
+    @work(thread=True, group="search")
+    def _run_search(self, query: str) -> None:
+        self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="dim yellow"))
+        try:
+            results = search(query)
+            formatted = format_results(results)
+        except Exception as e:
+            self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
+            return
+        self.call_from_thread(self._history_scroll.mount, Markdown(formatted))
+        self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+        # Inject results as context so the next prompt can reference them.
+        self.history.append({
+            "role": "assistant",
+            "content": f"[Web search results for: {query}]\n{formatted}",
+        })
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:

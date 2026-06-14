@@ -1,0 +1,96 @@
+import html as html_module
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from typing import List, Dict
+
+_TAGS_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def fetch_url(url: str, max_chars: int = 8000) -> str:
+    """Fetch a URL and return plain text (HTML tags stripped)."""
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; CodeHydra)"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+    text = _TAGS_RE.sub(" ", raw)
+    text = html_module.unescape(text)
+    text = _WS_RE.sub(" ", text).strip()
+    return text[:max_chars]
+
+
+class _DDGParser(HTMLParser):
+    """Parse DuckDuckGo Lite result rows into {title, url, snippet} dicts."""
+
+    def __init__(self):
+        super().__init__()
+        self.results: List[Dict] = []
+        self._buf = ""
+        self._in_link = False
+        self._in_snippet = False
+        self._current: Dict = {}
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "a" and a.get("class") == "result-link":
+            self._in_link = True
+            self._current = {"url": a.get("href", ""), "title": "", "snippet": ""}
+            self._buf = ""
+        elif tag == "td" and a.get("class") == "result-snippet":
+            self._in_snippet = True
+            self._buf = ""
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._in_link:
+            self._current["title"] = html_module.unescape(self._buf.strip())
+            self._in_link = False
+        elif tag == "td" and self._in_snippet:
+            self._current["snippet"] = html_module.unescape(
+                _WS_RE.sub(" ", self._buf).strip()
+            )
+            self._in_snippet = False
+            if self._current.get("title"):
+                self.results.append(dict(self._current))
+
+    def handle_data(self, data):
+        if self._in_link or self._in_snippet:
+            self._buf += data
+
+
+def search(query: str, max_results: int = 5) -> List[Dict]:
+    """Search via DuckDuckGo Lite (no API key). Returns [{title, url, snippet}]."""
+    # DDG Lite requires POST — GET returns the homepage.
+    data = urllib.parse.urlencode({"q": query}).encode()
+    req = urllib.request.Request(
+        "https://lite.duckduckgo.com/lite/",
+        data=data,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/html",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+    parser = _DDGParser()
+    parser.feed(raw)
+    return parser.results[:max_results]
+
+
+def format_results(results: List[Dict]) -> str:
+    if not results:
+        return "_No results found._"
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"**{i}. {r.get('title', '').strip()}**")
+        lines.append(f"<{r.get('url', '')}>")
+        if r.get("snippet"):
+            lines.append(r["snippet"])
+        lines.append("")
+    return "\n".join(lines)
