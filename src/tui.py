@@ -19,6 +19,7 @@ from src.routing.gateway import Gateway
 from src.routing.oss_provider import OllamaProvider
 from src.routing.session import SessionManager
 from src.tools.compiler import Compiler
+from src.tools.media import MEDIA_EXTS, image_to_base64, pdf_to_text
 from src.tools.patcher import Patcher
 from src.tools.scanner import Scanner
 from src.tools.websearch import fetch_url, format_results, search
@@ -249,11 +250,14 @@ class HydraApp(App):
 
     _AT_FILE_RE = re.compile(r"@(https?://[^\s]+|[\w./\-]+)")
 
-    def _expand_file_refs(self, text: str) -> tuple[str, list[str]]:
-        """Replaces @path and @https://url tokens with content inline.
-        Returns (expanded_text, list_of_injected_tokens).
-        Unresolvable @tokens are left as-is."""
-        injected = []
+    def _expand_file_refs(self, text: str) -> tuple[str, list[str], list[Path]]:
+        """Replaces @path / @url tokens with content inline.
+        Media files (images/PDFs/videos) are stripped from the text and
+        returned separately as Path objects for per-CLI handling in the gateway.
+        Returns (expanded_text, injected_labels, media_files)."""
+        injected: list[str] = []
+        media_files: list[Path] = []
+
         def replace(m: re.Match) -> str:
             token = m.group(1)
             if token.startswith("http://") or token.startswith("https://"):
@@ -266,16 +270,21 @@ class HydraApp(App):
             path = Path(token)
             if not path.exists():
                 path = Path.cwd() / token
-            if path.is_file():
-                try:
-                    content = path.read_text(errors="replace")
-                    injected.append(token)
-                    return f"\n\n[File: {token}]\n```\n{content}\n```\n"
-                except Exception:
-                    pass
-            return m.group(0)  # leave unknown @tokens unchanged
+            if not path.is_file():
+                return m.group(0)
+            if path.suffix.lower() in MEDIA_EXTS:
+                media_files.append(path)
+                injected.append(token)
+                return ""  # removed from text; gateway injects per-CLI
+            try:
+                content = path.read_text(errors="replace")
+                injected.append(token)
+                return f"\n\n[File: {token}]\n```\n{content}\n```\n"
+            except Exception:
+                return m.group(0)
+
         expanded = self._AT_FILE_RE.sub(replace, text)
-        return expanded, injected
+        return expanded, injected, media_files
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -291,11 +300,11 @@ class HydraApp(App):
             self._handle_command(text)
             return
 
-        expanded, injected = self._expand_file_refs(text)
+        expanded, injected, media_files = self._expand_file_refs(text)
         self._add_message(Text(f"> {text}", style="dim"))
         if injected:
             self._add_message(Text(f"  @{' @'.join(injected)}", style="dim cyan"))
-        self._run_prompt(expanded)
+        self._run_prompt(expanded, media_files)
 
     def _handle_command(self, user_input: str) -> None:
         cmd = user_input[1:].lower()
@@ -500,7 +509,7 @@ class HydraApp(App):
     # -- workers ---------------------------------------------------------
 
     @work(thread=True, exclusive=True, group="prompt")
-    def _run_prompt(self, prompt: str) -> None:
+    def _run_prompt(self, prompt: str, media_files: list[Path] | None = None) -> None:
         self.call_from_thread(self._refresh_system_msg)
         turns = [m for m in self.history if m["role"] != "system"]
         history_chars = sum(len(m["content"]) for m in turns)
@@ -525,6 +534,7 @@ class HydraApp(App):
                     cli_override=self.cli_override,
                     model_override=self.model_override,
                     mode=self.mode,
+                    media_files=media_files or [],
                 ):
                     if chunk == THINKING_START:
                         in_thinking = True

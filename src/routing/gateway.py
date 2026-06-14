@@ -13,6 +13,7 @@ from src.routing.config import load_routing_config
 from src.routing.claude_session import ClaudeSession
 from src.routing.oss_provider import OllamaProvider
 from src.mcp.config import load_mcp_servers
+from src.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_base64, pdf_to_text
 
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
@@ -244,7 +245,7 @@ class Gateway:
             return None, (data.get("stats") or {}).get("total_tokens")
         return None, None
 
-    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo", stream: bool = False):
+    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo", stream: bool = False, media_files: List[Path] = []):
         """Builds the subprocess argv + env for invoking a CLI with a prompt."""
         cli_path = shutil.which(cli_name)
         if not cli_path:
@@ -260,6 +261,32 @@ class Gateway:
                 turns = turns[-self._CONTEXT_WINDOW:]
             messages = system + turns
 
+        # For non-gemini CLIs, inject media content as text before assembling
+        # the prompt. Gemini handles @path refs natively so we leave those for
+        # the prompt string below.
+        if media_files and cli_name != "gemini":
+            extra = []
+            for p in media_files:
+                ext = p.suffix.lower()
+                if ext in PDF_EXTS:
+                    text = pdf_to_text(p)
+                    if text:
+                        extra.append(f"[PDF: {p.name}]\n{text}")
+                    else:
+                        extra.append(f"[PDF: {p.name} — install pdftotext (poppler) to extract text]")
+                elif ext in IMAGE_EXTS:
+                    extra.append(f"[Image attached: {p.name} — image rendering not supported for {cli_name}]")
+                elif ext in VIDEO_EXTS:
+                    extra.append(f"[Video attached: {p.name} — video not supported for {cli_name}]")
+            if extra:
+                # Prepend to last user message content
+                messages = list(messages)
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        messages[i] = dict(messages[i])
+                        messages[i]["content"] = "\n\n".join(extra) + "\n\n" + messages[i]["content"]
+                        break
+
         full_prompt = ""
         for msg in messages:
             role = msg.get("role", "")
@@ -269,6 +296,10 @@ class Gateway:
         model_name = model.split("/")[-1]
 
         if cli_name == "gemini":
+            # Prepend @path refs so gemini resolves them natively (multimodal).
+            if media_files:
+                refs = " ".join(f"@{p.absolute()}" for p in media_files)
+                full_prompt = refs + "\n\n" + full_prompt
             cmd = [cli_path, "--prompt", full_prompt, "--model", model_name]
             # Plain text mode buffers the whole response and prints it at
             # once at the end; stream-json emits incremental text deltas.
@@ -345,9 +376,9 @@ class Gateway:
         """Diagnostic lines some CLIs (e.g. gemini) print to stdout."""
         return line.startswith("[ExtensionManager]") or "MCP issues detected" in line
 
-    def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> str:
+    def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo", media_files: List[Path] = []) -> str:
         """Executes a local CLI (gemini, codex, claude) and returns its full output."""
-        cmd, env = self._build_cmd(cli_name, messages, model, mode)
+        cmd, env = self._build_cmd(cli_name, messages, model, mode, media_files=media_files)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
@@ -448,7 +479,7 @@ class Gateway:
             self._claude_session.close()
             self._claude_session = None
 
-    def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo") -> Generator[str, None, None]:
+    def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo", media_files: List[Path] = []) -> Generator[str, None, None]:
         """Executes a local CLI and yields its output incrementally.
 
         claude/gemini use stream-json so chunks are real token deltas as the
@@ -460,7 +491,7 @@ class Gateway:
             return
 
         stream_json = cli_name == "gemini"
-        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json)
+        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json, media_files=media_files)
         line_parser = self._parse_gemini_stream_line if cli_name == "gemini" else None
 
         try:
@@ -591,9 +622,19 @@ class Gateway:
             return "ollama"
         raise Exception(f"Unsupported model provider in: {model}")
 
-    def _run_oss_stream(self, model: str, messages: List[Dict], tier: Optional[str] = None) -> Generator[str, None, None]:
+    def _run_oss_stream(self, model: str, messages: List[Dict], tier: Optional[str] = None, media_files: List[Path] = []) -> Generator[str, None, None]:
         """Streams from an Ollama server (local or remote via OLLAMA_HOST)."""
         model_name = model.split("/")[-1]
+        # Inject base64 images into last user message for vision-capable models.
+        if media_files:
+            images = [image_to_base64(p) for p in media_files if p.suffix.lower() in IMAGE_EXTS]
+            if images:
+                messages = list(messages)
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        messages[i] = dict(messages[i])
+                        messages[i]["images"] = images
+                        break
         yielded_any = False
         try:
             for chunk in OllamaProvider.generate(model_name, messages):
@@ -613,6 +654,7 @@ class Gateway:
         cli_override: Optional[str] = None,
         model_override: Optional[str] = None,
         mode: str = "yolo",
+        media_files: List[Path] = [],
     ) -> str:
         """Routes request to appropriate CLI model with fallback logic.
 
@@ -629,8 +671,8 @@ class Gateway:
         if resolved:
             cli_name, model = resolved
             if cli_name == "ollama":
-                return "".join(self._run_oss_stream(model, messages, tier=tier))
-            return self._run_cli(cli_name, messages, model, tier=tier, mode=mode)
+                return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
+            return self._run_cli(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
 
@@ -639,8 +681,8 @@ class Gateway:
             try:
                 cli = self._cli_for_model(model)
                 if cli == "ollama":
-                    return "".join(self._run_oss_stream(model, messages, tier=tier))
-                return self._run_cli(cli, messages, model, tier=tier, mode=mode)
+                    return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
+                return self._run_cli(cli, messages, model, tier=tier, mode=mode, media_files=media_files)
             except Exception as e:
                 if self._RATE_LIMIT_RE.search(str(e)):
                     self._mark_rate_limited(self._cli_for_model(model))
@@ -659,6 +701,7 @@ class Gateway:
         cli_override: Optional[str] = None,
         model_override: Optional[str] = None,
         mode: str = "yolo",
+        media_files: List[Path] = [],
     ) -> Generator[str, None, None]:
         """Like request(), but yields output incrementally as the CLI produces it.
 
@@ -674,9 +717,9 @@ class Gateway:
         if resolved:
             cli_name, model = resolved
             if cli_name == "ollama":
-                yield from self._run_oss_stream(model, messages, tier=tier)
+                yield from self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
             else:
-                yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode)
+                yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
             return
 
         models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
@@ -686,9 +729,9 @@ class Gateway:
             try:
                 cli = self._cli_for_model(model)
                 gen = (
-                    self._run_oss_stream(model, messages, tier=tier)
+                    self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
                     if cli == "ollama"
-                    else self._run_cli_stream(cli, messages, model, tier=tier, mode=mode)
+                    else self._run_cli_stream(cli, messages, model, tier=tier, mode=mode, media_files=media_files)
                 )
                 first_chunk = next(gen)
             except StopIteration:
