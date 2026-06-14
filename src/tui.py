@@ -24,6 +24,7 @@ from src.tools.scanner import Scanner
 
 
 SKILLS_DIR = Path(".codehydra/skills")
+MEMORY_FILE = Path(".codehydra/memory.md")
 
 SLASH_COMMANDS = [
     "/effort low", "/effort medium", "/effort high",
@@ -36,6 +37,7 @@ SLASH_COMMANDS = [
     "/skills",
     "/sessions", "/resume",
     "/cost", "/clear", "/compact", "/exit",
+    "/memory", "/remember", "/forget",
 ]
 
 
@@ -106,6 +108,7 @@ class HydraApp(App):
             f"{context}"
         )
         self.history = [{"role": "system", "content": self.system_msg}]
+        self._refresh_system_msg()
         self.effort_tier = None
         self.cli_override = None
         self.model_override = None
@@ -156,6 +159,15 @@ class HydraApp(App):
         self.query_one("#status", Static).update(
             f"cli={cli}  model={model}  effort={tier}  mode={self.mode}  session={self.session_id}{rl_str}"
         )
+
+    def _refresh_system_msg(self) -> None:
+        """Rebuild history[0] with current memory file content prepended."""
+        memory = MEMORY_FILE.read_text().strip() if MEMORY_FILE.exists() else ""
+        if memory:
+            full = f"## Project Memory\n{memory}\n\n---\n\n{self.system_msg}"
+        else:
+            full = self.system_msg
+        self.history[0] = {"role": "system", "content": full}
 
     def _add_message(self, renderable) -> Static:
         widget = Static(renderable)
@@ -442,6 +454,31 @@ class HydraApp(App):
             self._add_message(Text(f"> /skill {skill_name}" + (f" {skill_prompt}" if skill_prompt else ""), style="dim"))
             self._add_message(Text(f"  skill: {skill_name}", style="dim cyan"))
             self._run_prompt(prompt)
+        elif cmd == "memory":
+            if not MEMORY_FILE.exists() or not MEMORY_FILE.read_text().strip():
+                self._add_message(Text("No project memory yet. Use /remember <fact>", style="dim"))
+            else:
+                self._add_message(Markdown(MEMORY_FILE.read_text()))
+        elif cmd.startswith("remember "):
+            fact = user_input[len("/remember "):].strip()
+            if fact:
+                MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with MEMORY_FILE.open("a") as f:
+                    f.write(f"- {fact}\n")
+                self._refresh_system_msg()
+                self._add_message(Text(f"Remembered: {fact}", style="green"))
+        elif cmd.startswith("forget "):
+            pattern = user_input[len("/forget "):].strip().lower()
+            if MEMORY_FILE.exists():
+                lines = MEMORY_FILE.read_text().splitlines(keepends=True)
+                kept = [l for l in lines if pattern not in l.lower()]
+                removed = len(lines) - len(kept)
+                MEMORY_FILE.write_text("".join(kept))
+                self._refresh_system_msg()
+                self._add_message(Text(
+                    f"Removed {removed} line(s) matching '{pattern}'" if removed else f"No lines matched '{pattern}'",
+                    style="yellow",
+                ))
         else:
             self._add_message(Text(f"Unknown command: {cmd}", style="red"))
 
@@ -449,6 +486,7 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str) -> None:
+        self.call_from_thread(self._refresh_system_msg)
         turns = [m for m in self.history if m["role"] != "system"]
         history_chars = sum(len(m["content"]) for m in turns)
         if history_chars > self._AUTO_COMPACT_CHARS:
