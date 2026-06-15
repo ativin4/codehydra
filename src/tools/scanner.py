@@ -11,7 +11,11 @@ class Scanner:
 
     def _load_gitignore(self) -> pathspec.PathSpec:
         """Loads .gitignore and adds some default ignores."""
-        ignore_patterns = [".git/", "__pycache__/", "node_modules/", ".venv/", "*.pyc"]
+        ignore_patterns = [
+            ".git/", "__pycache__/", "node_modules/", ".venv/", "*.pyc",
+            ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+            "credentials.json", "secrets.json", ".secrets",
+        ]
         gitignore_path = self.root_dir / ".gitignore"
         if gitignore_path.exists():
             with open(gitignore_path, "r") as f:

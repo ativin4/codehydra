@@ -1,5 +1,7 @@
 import html as html_module
+import ipaddress
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,8 +12,30 @@ _TAGS_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
+def _assert_public_url(url: str) -> None:
+    """Raises ValueError if url resolves to a private/internal IP."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http/https URLs are allowed, got: {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL has no hostname")
+    try:
+        addr_info = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise ValueError(f"Could not resolve host {host!r}: {e}") from e
+    for info in addr_info:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_private:
+            raise ValueError(f"URL resolves to private address {ip}")
+
+
 def fetch_url(url: str, max_chars: int = 8000) -> str:
     """Fetch a URL and return plain text (HTML tags stripped)."""
+    _assert_public_url(url)
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "Mozilla/5.0 (compatible; CodeHydra)"},

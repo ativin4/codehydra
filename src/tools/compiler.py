@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
@@ -28,8 +29,7 @@ class Compiler:
 
         try:
             result = subprocess.run(
-                cmd,
-                shell=True,
+                shlex.split(cmd),
                 cwd=self.root_dir,
                 capture_output=True,
                 text=True

@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 from typing import List, Tuple
@@ -11,14 +12,18 @@ class Patcher:
             re.DOTALL
         )
 
-    def apply_all_patches(self, content: str) -> List[str]:
+    def apply_all_patches(self, content: str, cwd: Path | None = None) -> List[str]:
         """Parses all patches from LLM response and applies them. Returns list of patched files."""
+        cwd = (cwd or Path.cwd()).resolve()
         matches = self.file_block_re.findall(content)
         patched_files = []
-        
+
         for file_path, search, replace in matches:
             file_path = file_path.strip()
-            path = Path(file_path)
+            path = (cwd / file_path).resolve()
+            if not path.is_relative_to(cwd):
+                logging.warning("Rejected path outside workspace: %s", file_path)
+                continue
             if not path.exists():
                 print(f"File not found: {file_path}")
                 continue

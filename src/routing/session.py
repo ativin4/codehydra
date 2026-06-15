@@ -1,8 +1,14 @@
 import json
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from src.routing.constants import Role
+
+_SESSION_ID_RE = re.compile(r'^[\w\-]{1,80}$')
+_VALID_ROLES = set(Role)
 
 
 class SessionManager:
@@ -16,6 +22,8 @@ class SessionManager:
         return f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
     def _path(self, session_id: str) -> Path:
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"Invalid session ID: {session_id!r}")
         return self.sessions_dir / f"{session_id}.json"
 
     def save(self, session_id: str, state: Dict[str, Any]) -> None:
@@ -25,12 +33,26 @@ class SessionManager:
             json.dump(payload, f, indent=2)
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
-        path = self._path(session_id)
+        try:
+            path = self._path(session_id)
+        except ValueError:
+            return None
         if not path.exists():
             return None
         try:
             with open(path, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+            history = data.get("history", [])
+            if not isinstance(history, list):
+                return None
+            for msg in history:
+                if not isinstance(msg, dict):
+                    return None
+                if msg.get("role") not in _VALID_ROLES:
+                    return None
+                if not isinstance(msg.get("content", ""), str):
+                    return None
+            return data
         except Exception:
             return None
 

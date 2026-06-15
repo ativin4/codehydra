@@ -12,9 +12,11 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.suggester import Suggester
+from textual.widget import Widget
 from textual.widgets import Footer, Input, Markdown, Static
 
 from src.routing.claude_session import THINKING_END, THINKING_START
+from src.routing.constants import CLI, Mode, Role, Tier
 from src.routing.gateway import Gateway
 from src.routing.oss_provider import OllamaProvider
 from src.routing.session import SessionManager
@@ -29,19 +31,63 @@ SKILLS_DIR = Path(".codehydra/skills")
 MEMORY_FILE = Path(".codehydra/memory.md")
 
 SLASH_COMMANDS = [
-    "/effort low", "/effort medium", "/effort high",
-    "/cli auto", "/cli claude", "/cli gemini", "/cli codex", "/cli ollama",
+    f"/effort {Tier.LOW}", f"/effort {Tier.MEDIUM}", f"/effort {Tier.HIGH}",
+    f"/cli auto", f"/cli {CLI.CLAUDE}", f"/cli {CLI.GEMINI}", f"/cli {CLI.CODEX}", f"/cli {CLI.OLLAMA}",
     "/model auto",
-    "/mode plan", "/mode yolo",
-    "/login claude", "/login gemini", "/login codex", "/login ollama",
+    f"/mode {Mode.PLAN}", f"/mode {Mode.YOLO}",
+    f"/login {CLI.CLAUDE}", f"/login {CLI.GEMINI}", f"/login {CLI.CODEX}", f"/login {CLI.OLLAMA}",
     "/parallel",
     "/compare",
     "/skills",
     "/sessions", "/resume",
-    "/cost", "/clear", "/compact", "/exit",
+    "/cost", "/clear", "/compact", "/help", "/exit",
     "/memory", "/remember", "/forget",
     "/search",
 ]
+
+HELP_TEXT = """\
+## CodeHydra Commands
+
+**Routing**
+| Command | Description |
+|---|---|
+| `/effort low\\|medium\\|high` | Set effort tier — affects model quality |
+| `/cli auto\\|claude\\|gemini\\|codex\\|ollama` | Pin backend CLI for this session |
+| `/model <name\\|auto>` | Pin exact model name |
+| `/mode plan\\|yolo` | `plan`=read-only, `yolo`=auto-approve edits |
+
+**Auth**
+| `/login <cli>` | Launch auth flow, or show setup info for ollama |
+
+**Context**
+| `/compact` | Summarise old history, keep 2 recent turns |
+| `/memory` | Show project memory |
+| `/remember <fact>` | Save a fact (persists across sessions) |
+| `/forget <pattern>` | Remove memory lines matching pattern |
+| `/search <query>` | DuckDuckGo search — results injected as context |
+
+**Inline expansions (in any prompt)**
+| `@path/to/file` | Inject file content |
+| `@https://url` | Fetch URL and inject content |
+| `@image.png` | Attach image (gemini: native multimodal; ollama: vision API) |
+| `@doc.pdf` | Attach PDF (gemini: native; others: pdftotext) |
+
+**Skills**
+| `/skills` | List skills in `.codehydra/skills/` |
+| `/skill <name> [prompt]` | Run a skill |
+
+**Multi-CLI**
+| `/compare <prompt>` | Same prompt to all active CLIs — compare results |
+| `/parallel "t1" "t2"` | Run tasks concurrently, each in its own CLI process |
+
+**Session**
+| `/sessions` | List saved sessions |
+| `/resume [id]` | Resume a session (defaults to most recent) |
+| `/cost` | Per-turn CLI/model/tier and token usage |
+| `/clear` | Reset conversation history |
+
+Press **Ctrl+C** to quit.
+"""
 
 
 def _skill_names() -> list[str]:
@@ -98,24 +144,13 @@ class HydraApp(App):
         self.compiler = Compiler()
         self.sessions = SessionManager()
 
-        context = self.scanner.get_system_prompt_context()
-        self.system_msg = (
-            "You are CodeHydra, an autonomous coding agent. "
-            "To modify files, use the following format:\n"
-            "File: path/to/file\n"
-            "<<<<<<< SEARCH\n"
-            "[exact code to find]\n"
-            "=======\n"
-            "[new code to replace with]\n"
-            ">>>>>>> REPLACE\n"
-            f"{context}"
-        )
-        self.history = [{"role": "system", "content": self.system_msg}]
+        self.system_msg = self._build_system_msg_base()
+        self.history = [{"role": Role.SYSTEM, "content": self.system_msg}]
         self._refresh_system_msg()
         self.effort_tier = None
         self.cli_override = None
         self.model_override = None
-        self.mode = "yolo"
+        self.mode = Mode.YOLO
         self.usage_log = []
         self.session_id = self.sessions.new_session_id()
 
@@ -137,7 +172,7 @@ class HydraApp(App):
             f"Ready CLIs: {', '.join(ready)}"
             if ready else "No CLIs are logged in. Run /login <cli> to authenticate."
         )
-        unauthenticated = [cli for cli, ok in auth_status.items() if not ok]
+        unauthenticated = [cli for cli, ok in auth_status.items() if not ok and cli in Gateway.LOGIN_COMMANDS]
         lines = [Text("CodeHydra - BYOS Agent Active", style="bold green"), Text(sub_info)]
         if unauthenticated:
             lines.append(Text(
@@ -155,13 +190,27 @@ class HydraApp(App):
         model = self.model_override or "auto"
         tier = self.effort_tier or "auto"
         rl_parts = []
-        for name in ("claude", "gemini", "codex", "ollama"):
+        for name in CLI:
             secs = self.gateway.rate_limit_resets_in(name)
             if secs is not None:
                 rl_parts.append(f"{name}⏳{secs}s")
         rl_str = f"  rate-limited: {' '.join(rl_parts)}" if rl_parts else ""
         self.query_one("#status", Static).update(
             f"cli={cli}  model={model}  effort={tier}  mode={self.mode}  session={self.session_id}{rl_str}"
+        )
+
+    def _build_system_msg_base(self) -> str:
+        context = self.scanner.get_system_prompt_context()
+        return (
+            "You are CodeHydra, an autonomous coding agent. "
+            "To modify files, use the following format:\n"
+            "File: path/to/file\n"
+            "<<<<<<< SEARCH\n"
+            "[exact code to find]\n"
+            "=======\n"
+            "[new code to replace with]\n"
+            ">>>>>>> REPLACE\n"
+            f"{context}"
         )
 
     def _refresh_system_msg(self) -> None:
@@ -171,10 +220,10 @@ class HydraApp(App):
             full = f"## Project Memory\n{memory}\n\n---\n\n{self.system_msg}"
         else:
             full = self.system_msg
-        self.history[0] = {"role": "system", "content": full}
+        self.history[0] = {"role": Role.SYSTEM, "content": full}
 
-    def _add_message(self, renderable) -> Static:
-        widget = Static(renderable)
+    def _add_message(self, renderable) -> Widget:
+        widget = renderable if isinstance(renderable, Widget) else Static(renderable)
         history = self._history_scroll
         history.mount(widget)
         history.scroll_end(animate=False)
@@ -214,7 +263,7 @@ class HydraApp(App):
         })
 
     def _login(self, cli_name: str) -> None:
-        if cli_name == "ollama":
+        if cli_name == CLI.OLLAMA:
             self.gateway.refresh_auth()
             available = OllamaProvider.list_models()
             if available:
@@ -259,18 +308,25 @@ class HydraApp(App):
         injected: list[str] = []
         media_files: list[Path] = []
 
+        cwd = Path.cwd().resolve()
+
         def replace(m: re.Match) -> str:
             token = m.group(1)
             if token.startswith("http://") or token.startswith("https://"):
+                token = token.rstrip(".,;:!?)>]<")
                 try:
                     content = fetch_url(token)
                     injected.append(token)
-                    return f"\n\n[URL: {token}]\n{content}\n"
+                    return (
+                        f"\n\n<untrusted-external-content source=\"{token}\">\n"
+                        f"{content}\n"
+                        f"</untrusted-external-content>\n"
+                    )
                 except Exception:
                     return m.group(0)
-            path = Path(token)
-            if not path.exists():
-                path = Path.cwd() / token
+            path = (cwd / token).resolve()
+            if not path.is_relative_to(cwd):
+                return m.group(0)
             if not path.is_file():
                 return m.group(0)
             if path.suffix.lower() in MEDIA_EXTS:
@@ -280,7 +336,11 @@ class HydraApp(App):
             try:
                 content = path.read_text(errors="replace")
                 injected.append(token)
-                return f"\n\n[File: {token}]\n```\n{content}\n```\n"
+                return (
+                    f"\n\n<untrusted-file-content path=\"{token}\">\n"
+                    f"```\n{content}\n```\n"
+                    f"</untrusted-file-content>\n"
+                )
             except Exception:
                 return m.group(0)
 
@@ -313,13 +373,13 @@ class HydraApp(App):
         if cmd == "exit":
             self.exit()
         elif cmd == "clear":
-            self.history = [{"role": "system", "content": self.system_msg}]
+            self.history = [{"role": Role.SYSTEM, "content": self.system_msg}]
             self._history_scroll.remove_children()
         elif cmd == "compact":
             self._run_compact()
         elif cmd.startswith("login"):
             parts = cmd.split(" ")
-            valid_logins = list(Gateway.LOGIN_COMMANDS) + ["ollama"]
+            valid_logins = list(Gateway.LOGIN_COMMANDS) + [CLI.OLLAMA]
             if len(parts) != 2:
                 self._add_message(Text(f"Usage: /login <{'|'.join(valid_logins)}>", style="red"))
             else:
@@ -351,7 +411,7 @@ class HydraApp(App):
             self._update_status()
         elif cmd.startswith("mode"):
             parts = cmd.split(" ")
-            if len(parts) != 2 or parts[1] not in ("plan", "yolo"):
+            if len(parts) != 2 or parts[1] not in (Mode.PLAN, Mode.YOLO):
                 self._add_message(Text("Usage: /mode <plan|yolo>", style="red"))
             else:
                 self.mode = parts[1]
@@ -383,8 +443,10 @@ class HydraApp(App):
                 self.effort_tier = data.get("effort_tier")
                 self.cli_override = data.get("cli_override")
                 self.model_override = data.get("model_override")
-                self.mode = data.get("mode", "yolo")
+                self.mode = data.get("mode", Mode.YOLO)
                 self.usage_log = data.get("usage_log", [])
+                self.system_msg = self._build_system_msg_base()
+                self._refresh_system_msg()
                 self._render_history()
                 self._add_message(Text(f"Resumed session {self.session_id}", style="yellow"))
                 self._update_status()
@@ -504,6 +566,8 @@ class HydraApp(App):
                     f"Removed {removed} line(s) matching '{pattern}'" if removed else f"No lines matched '{pattern}'",
                     style="yellow",
                 ))
+        elif cmd == "help":
+            self._add_message(Markdown(HELP_TEXT))
         else:
             self._add_message(Text(f"Unknown command: {cmd}", style="red"))
 
@@ -512,7 +576,7 @@ class HydraApp(App):
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str, media_files: list[Path] | None = None) -> None:
         self.call_from_thread(self._refresh_system_msg)
-        turns = [m for m in self.history if m["role"] != "system"]
+        turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
         if history_chars > self._AUTO_COMPACT_CHARS:
             self.call_from_thread(self._add_message, Text("↩ Auto-compacting history…", style="dim yellow"))
@@ -562,8 +626,8 @@ class HydraApp(App):
                 self.call_from_thread(self._add_message, Text(tag, style="dim"))
             self.call_from_thread(self._update_status)
 
-            self.history.append({"role": "user", "content": prompt})
-            self.history.append({"role": "assistant", "content": response})
+            self.history.append({"role": Role.USER, "content": prompt})
+            self.history.append({"role": Role.ASSISTANT, "content": response})
             if usage:
                 self.usage_log.append(usage)
             self._save_session()
@@ -587,7 +651,7 @@ class HydraApp(App):
     def _do_compact(self) -> str | None:
         """Compact history in-place. Returns a status string, or None if nothing to compact.
         Must be called from a worker thread (calls gateway.request which blocks)."""
-        turns = [m for m in self.history if m["role"] != "system"]
+        turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         if len(turns) < 6:
             return None
         to_summarize = turns[:-4]
@@ -601,23 +665,28 @@ class HydraApp(App):
             "and any unresolved issues. Be specific — mention filenames and function names.\n\n"
             f"{conv_text}"
         )
+        auth = self.gateway.cli_auth_status
+        best_cli = next(
+            (c for c in (CLI.CLAUDE, CLI.GEMINI, CLI.CODEX) if auth.get(c)),
+            self.cli_override,
+        )
         summary = self.gateway.request(
             summary_prompt,
             tier="low",
             history=[],
-            cli_override=self.cli_override,
-            mode="plan",
+            cli_override=best_cli,
+            mode=Mode.PLAN,
         )
-        system = [m for m in self.history if m["role"] == "system"]
+        system = [m for m in self.history if m["role"] == Role.SYSTEM]
         self.history = system + [
-            {"role": "assistant", "content": f"[Compacted history — {len(to_summarize)//2} earlier turns]\n{summary.strip()}"}
+            {"role": Role.ASSISTANT, "content": f"[Compacted history — {len(to_summarize)//2} earlier turns]\n{summary.strip()}"}
         ] + recent
         self._save_session()
         return f"Compacted {len(to_summarize)//2} turns → summary + {len(recent)//2} recent turns kept"
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_compact(self) -> None:
-        turns = [m for m in self.history if m["role"] != "system"]
+        turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         if len(turns) < 6:
             self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
             return
@@ -638,8 +707,7 @@ class HydraApp(App):
         except Exception as e:
             self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
             return
-        self.call_from_thread(self._history_scroll.mount, Markdown(formatted))
-        self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+        self.call_from_thread(self._add_message, Markdown(formatted))
         # Inject results as context so the next prompt can reference them.
         self.history.append({
             "role": "assistant",
@@ -649,6 +717,7 @@ class HydraApp(App):
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
         parent_auth = self.gateway.cli_auth_status
+        history_snapshot = list(self.history)
 
         def run_task(prompt: str):
             gw = Gateway()
@@ -656,7 +725,7 @@ class HydraApp(App):
             result = gw.request(
                 prompt,
                 tier=self.effort_tier,
-                history=self.history,
+                history=history_snapshot,
                 cli_override=self.cli_override,
                 model_override=self.model_override,
                 mode=self.mode,
@@ -675,12 +744,11 @@ class HydraApp(App):
 
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
                 self.call_from_thread(self._add_message, Text(f"> {prompt[:60]}", style="dim"))
-                md = Markdown(result)
-                self.call_from_thread(self._history_scroll.mount, md)
+                self.call_from_thread(self._add_message, Markdown(result))
                 if tag:
                     self.call_from_thread(self._add_message, Text(tag, style="dim"))
-                self.history.append({"role": "user", "content": prompt})
-                self.history.append({"role": "assistant", "content": result})
+                self.history.append({"role": Role.USER, "content": prompt})
+                self.history.append({"role": Role.ASSISTANT, "content": result})
                 if usage:
                     self.usage_log.append(usage)
 
@@ -691,6 +759,7 @@ class HydraApp(App):
         """Sends the same prompt to every active CLI in parallel and renders
         each response as a labelled block so the user can compare answers."""
         parent_auth = self.gateway.cli_auth_status
+        history_snapshot = list(self.history)
 
         def run_one(cli: str):
             gw = Gateway()
@@ -699,13 +768,14 @@ class HydraApp(App):
             result = gw.request(
                 prompt,
                 tier=self.effort_tier,
-                history=self.history,
+                history=history_snapshot,
                 cli_override=cli,
                 mode=self.mode,
             )
             elapsed = time.monotonic() - t0
             return result, gw.last_usage, elapsed
 
+        results_by_cli: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=len(cli_names)) as executor:
             futures = {executor.submit(run_one, cli): cli for cli in cli_names}
             for future in as_completed(futures):
@@ -719,14 +789,22 @@ class HydraApp(App):
                     )
                     continue
 
+                results_by_cli[cli] = result
                 model_tag = usage["model"].split("/")[-1] if usage else cli
                 header = Text(f"── {cli} / {model_tag}  ({elapsed:.1f}s) ──", style="bold cyan")
                 self.call_from_thread(self._add_message, header)
-                md = Markdown(result)
-                self.call_from_thread(self._history_scroll.mount, md)
+                self.call_from_thread(self._add_message, Markdown(result))
                 if usage:
                     self.usage_log.append(usage)
 
+        if results_by_cli:
+            combined = "\n\n---\n\n".join(
+                f"**{cli}:**\n{results_by_cli[cli]}"
+                for cli in cli_names
+                if cli in results_by_cli
+            )
+            self.history.append({"role": Role.USER, "content": prompt})
+            self.history.append({"role": Role.ASSISTANT, "content": f"[Compare]\n{combined}"})
         self._save_session()
 
 

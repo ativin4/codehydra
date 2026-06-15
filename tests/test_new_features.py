@@ -315,18 +315,37 @@ class TestCloudCLI:
         assert "STREAM_OK" in full
 
     def test_memory_injected_in_system(self):
-        """System prompt content must be visible to the model."""
+        """_build_cmd must pass history's system entry via --system-prompt for Claude."""
         from src.routing.gateway import Gateway
-        gw = Gateway()
+        import subprocess as _sp
+
         marker = "XHYDRA_TEST_MARKER_42X"
-        system = f"Whenever asked to repeat the marker, say exactly: {marker}"
-        result = gw.request(
-            "Repeat the marker from your instructions. Output only the marker, nothing else.",
-            tier="low",
-            cli_override="claude",
-            history=[{"role": "system", "content": system}],
-        )
-        assert marker in result
+        system = f"system context: {marker}"
+        captured_cmd: list[list] = []
+
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = "ok"
+        fake_result.stderr = ""
+
+        def spy_run(cmd, **kwargs):
+            captured_cmd.append(list(cmd))
+            return fake_result
+
+        gw = Gateway()
+        with patch("src.routing.gateway.subprocess.run", spy_run):
+            gw.request(
+                "dummy prompt",
+                tier="low",
+                cli_override="claude",
+                history=[{"role": "system", "content": system}],
+            )
+
+        assert captured_cmd, "subprocess.run was never called"
+        cmd = captured_cmd[0]
+        assert "--system-prompt" in cmd
+        idx = cmd.index("--system-prompt")
+        assert cmd[idx + 1] == system
 
     def test_media_pdf_text_extraction(self, tmp_path):
         """If pdftotext is available, extracted text reaches the model."""

@@ -191,5 +191,10 @@ class Scavenger:
         # os.environ["ANTHROPIC_API_KEY"] = "sk-ant-session-bypass"
 
 if __name__ == "__main__":
+    import sys as _sys
     scavenger = Scavenger()
-    print(json.dumps(scavenger.get_all_headers(), indent=2))
+    if "--dump-tokens" in _sys.argv:
+        print(json.dumps(scavenger.get_all_headers(), indent=2))
+    else:
+        print(f"Active providers: {scavenger.get_active_providers()}")
+        print("Pass --dump-tokens to print raw credential headers.")

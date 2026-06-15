@@ -10,6 +10,7 @@ they don't get this server themselves.
 """
 import json
 import os
+import shlex
 import signal
 import subprocess
 import uuid
@@ -72,15 +73,18 @@ def _is_running(pid: int) -> bool:
 
 @mcp.tool()
 def run_in_background(command: str) -> dict:
-    """Start a shell command running in the background and return a task id.
+    """Start a command running in the background and return a task id.
 
     Use this for long-running processes (dev servers, watchers, long builds)
     that should keep running after this turn ends. The process keeps running
     even after the current CLI invocation exits. Check on it with
     get_background_output and stop it with stop_background_task.
 
+    The command is split via shlex.split — shell metacharacters (pipes,
+    redirects, &&) are not supported. Pass a single executable with its args.
+
     Args:
-        command: Shell command to run (executed via the system shell).
+        command: Command to run (split via shlex; no shell metacharacters).
 
     Returns:
         {"task_id": ..., "pid": ...}
@@ -92,8 +96,7 @@ def run_in_background(command: str) -> dict:
 
     with open(log_path, "w") as log_file:
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            shlex.split(command),
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,

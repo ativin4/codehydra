@@ -13,7 +13,9 @@ from src.routing.config import load_routing_config
 from src.routing.claude_session import ClaudeSession
 from src.routing.oss_provider import OllamaProvider
 from src.mcp.config import load_mcp_servers
+from src.routing.constants import CLI, Mode, Role, Tier
 from src.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_base64, pdf_to_text
+
 
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
@@ -23,70 +25,70 @@ class Gateway:
     # updating as new generations ship — override via [routing.model_map]
     # in .agentrc.toml instead of editing this code.
     MODEL_MAP = {
-        "low": ["anthropic/haiku", "codex/default", "gemini/gemini-2.5-flash", "ollama/llama3.2"],
-        "medium": ["anthropic/sonnet", "codex/default", "gemini/gemini-2.5-pro", "ollama/llama3.2"],
-        "high": ["anthropic/opus", "codex/default", "gemini/gemini-3-pro-preview", "ollama/llama3.3"],
+        Tier.LOW:    [f"anthropic/haiku",  f"codex/default", f"gemini/gemini-2.5-flash", f"ollama/llama3.2"],
+        Tier.MEDIUM: [f"anthropic/sonnet", f"codex/default", f"gemini/gemini-2.5-pro",   f"ollama/llama3.2"],
+        Tier.HIGH:   [f"anthropic/opus",   f"codex/default", f"gemini/gemini-2.5-pro",   f"ollama/llama3.3"],
     }
 
     # Default model used for each CLI/tier when /cli pins a backend without
     # /model. Override via [routing.models.<cli>] in .agentrc.toml.
     CLI_DEFAULT_MODELS = {
-        "claude": {"low": "haiku", "medium": "sonnet", "high": "opus"},
-        "gemini": {"low": "gemini-2.5-flash", "medium": "gemini-2.5-pro", "high": "gemini-3-pro-preview"},
-        "codex": {"low": "default", "medium": "default", "high": "default"},
-        "ollama": {"low": "llama3.2", "medium": "llama3.2", "high": "llama3.3"},
+        CLI.CLAUDE: {Tier.LOW: "haiku",            Tier.MEDIUM: "sonnet",          Tier.HIGH: "opus"},
+        CLI.GEMINI: {Tier.LOW: "gemini-2.5-flash", Tier.MEDIUM: "gemini-2.5-pro",  Tier.HIGH: "gemini-2.5-pro"},
+        CLI.CODEX:  {Tier.LOW: "default",          Tier.MEDIUM: "default",         Tier.HIGH: "default"},
+        CLI.OLLAMA: {Tier.LOW: "llama3.2",         Tier.MEDIUM: "llama3.2",        Tier.HIGH: "llama3.3"},
     }
 
     # Maps a model's "<provider>/" prefix to the scavenger provider name used
     # for subscription detection and [routing] priority ordering.
     PROVIDER_MAP = {
         "anthropic": "anthropic",
-        "gemini": "google",
-        "github": "github",
-        "codex": "github",
-        "ollama": "ollama",
+        "gemini":    "google",
+        "github":    "github",
+        "codex":     "github",
+        "ollama":    "ollama",
     }
 
     # Flags that put each CLI in non-interactive mode, per session /mode.
-    # "yolo": auto-approve edits and commands (default; required for headless
+    # Mode.YOLO: auto-approve edits and commands (default; required for headless
     # operation since CLIs hang on permission prompts otherwise).
-    # "plan": read-only - the CLI can look around but can't edit files or run
+    # Mode.PLAN: read-only - the CLI can look around but can't edit files or run
     # commands. Useful for "what would you do" without touching the workspace.
     MODE_FLAGS = {
-        "yolo": {
+        Mode.YOLO: {
             # acceptEdits only auto-approves file edits - Bash and MCP tool
             # calls still prompt and hang headless. bypassPermissions is the
             # real full-auto mode.
-            "claude": ["--permission-mode", "bypassPermissions"],
+            CLI.CLAUDE: ["--permission-mode", "bypassPermissions"],
             # --approval-mode auto_edit hangs headless on the workspace-trust
             # prompt; --yolo + --skip-trust runs non-interactively.
-            "gemini": ["--yolo", "--skip-trust"],
+            CLI.GEMINI: ["--yolo", "--skip-trust"],
             # -a never: don't escalate to the user for approval (which would
             # hang headless) - MCP/exec tool calls run directly.
-            "codex": ["-s", "workspace-write", "-a", "never"],
+            CLI.CODEX:  ["-s", "workspace-write", "-a", "never"],
         },
-        "plan": {
-            "claude": ["--permission-mode", "plan"],
-            "gemini": ["--approval-mode", "plan", "--skip-trust"],
-            "codex": ["-s", "read-only", "-a", "never"],
+        Mode.PLAN: {
+            CLI.CLAUDE: ["--permission-mode", "plan"],
+            CLI.GEMINI: ["--approval-mode", "plan", "--skip-trust"],
+            CLI.CODEX:  ["-s", "read-only", "-a", "never"],
         },
     }
 
-    # Regexes for extracting token-usage info each CLI prints (best-effort,
     # Max non-system messages passed to one-shot CLIs (gemini/codex/ollama).
     # Claude manages its own context via persistent session.
     _CONTEXT_WINDOW = 30
 
+    # Regexes for extracting token-usage info each CLI prints (best-effort,
     # only some CLIs report this).
     USAGE_PATTERNS = {
-        "codex": re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE),
+        CLI.CODEX: re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE),
     }
 
     # Commands to launch each CLI's interactive auth flow.
     LOGIN_COMMANDS = {
-        "claude": ["claude", "auth", "login"],
-        "codex": ["codex", "login"],
-        "gemini": ["gemini"],  # first interactive launch walks through OAuth
+        CLI.CLAUDE: [CLI.CLAUDE, "auth", "login"],
+        CLI.CODEX:  [CLI.CODEX, "login"],
+        CLI.GEMINI: [CLI.GEMINI],  # first interactive launch walks through OAuth
     }
 
     def __init__(self):
@@ -100,7 +102,7 @@ class Gateway:
         # (e.g. claude's keychain entry) or conflate unrelated tokens (e.g.
         # a `gh` CLI login surfaces as "github" but doesn't mean codex is set up).
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
-        self.cli_auth_status["ollama"] = OllamaProvider.is_available()
+        self.cli_auth_status[CLI.OLLAMA] = OllamaProvider.is_available()
         # Persistent `claude -p --input-format stream-json` process (see
         # claude_session.py). _claude_history_len is the count of non-system
         # messages sent so far; used to detect new/resumed conversations that
@@ -239,7 +241,7 @@ class Gateway:
             data = json.loads(line)
         except json.JSONDecodeError:
             return None, None
-        if data.get("type") == "message" and data.get("role") == "assistant" and data.get("delta"):
+        if data.get("type") == "message" and data.get("role") == Role.ASSISTANT and data.get("delta"):
             return data.get("content"), None
         elif data.get("type") == "result":
             return None, (data.get("stats") or {}).get("total_tokens")
@@ -254,9 +256,9 @@ class Gateway:
         # Claude has a persistent session that tracks its own context; one-shot
         # CLIs get the full history concatenated as a string, so cap it to avoid
         # unbounded prompt growth across long conversations.
-        if cli_name != "claude":
-            system = [m for m in messages if m["role"] == "system"]
-            turns = [m for m in messages if m["role"] != "system"]
+        if cli_name != CLI.CLAUDE:
+            system = [m for m in messages if m["role"] == Role.SYSTEM]
+            turns = [m for m in messages if m["role"] != Role.SYSTEM]
             if len(turns) > self._CONTEXT_WINDOW:
                 turns = turns[-self._CONTEXT_WINDOW:]
             messages = system + turns
@@ -264,7 +266,7 @@ class Gateway:
         # For non-gemini CLIs, inject media content as text before assembling
         # the prompt. Gemini handles @path refs natively so we leave those for
         # the prompt string below.
-        if media_files and cli_name != "gemini":
+        if media_files and cli_name != CLI.GEMINI:
             extra = []
             for p in media_files:
                 ext = p.suffix.lower()
@@ -282,20 +284,27 @@ class Gateway:
                 # Prepend to last user message content
                 messages = list(messages)
                 for i in range(len(messages) - 1, -1, -1):
-                    if messages[i].get("role") == "user":
+                    if messages[i].get("role") == Role.USER:
                         messages[i] = dict(messages[i])
                         messages[i]["content"] = "\n\n".join(extra) + "\n\n" + messages[i]["content"]
                         break
 
+        # For Claude one-shot mode, extract the system message and pass it via
+        # --system-prompt so it's treated as a real system prompt, not injected
+        # as SYSTEM:\n...\n\n text (which Claude detects as prompt injection).
+        claude_system_prompt = ""
         full_prompt = ""
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
+            if cli_name == CLI.CLAUDE and role == Role.SYSTEM:
+                claude_system_prompt = content
+                continue
             full_prompt += f"{role.upper()}:\n{content}\n\n"
 
         model_name = model.split("/")[-1]
 
-        if cli_name == "gemini":
+        if cli_name == CLI.GEMINI:
             # Prepend @path refs so gemini resolves them natively (multimodal).
             if media_files:
                 refs = " ".join(f"@{p.absolute()}" for p in media_files)
@@ -305,26 +314,28 @@ class Gateway:
             # once at the end; stream-json emits incremental text deltas.
             if stream:
                 cmd += ["--output-format", "stream-json"]
-        elif cli_name == "codex":
+        elif cli_name == CLI.CODEX:
             # codex exec uses the account's default model; explicit model
             # aliases (e.g. "default") are not valid -m values.
             cmd = [cli_path, "exec", full_prompt]
-        elif cli_name == "claude":
+        elif cli_name == CLI.CLAUDE:
             cmd = [cli_path, "-p", full_prompt, "--model", model_name]
+            if claude_system_prompt:
+                cmd += ["--system-prompt", claude_system_prompt]
         else:
             cmd = [cli_path, full_prompt]
 
         # Insert mode flags (yolo/plan). codex's (-s/-a) are global flags and
         # must precede the "exec" subcommand; the others are top-level flags.
         insert_at = 1
-        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS["yolo"]).get(cli_name, [])
+        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO]).get(cli_name, [])
         cmd[insert_at:insert_at] = mode_flags
 
         # Wire up MCP servers declared in .agentrc.toml, if any.
         if self.mcp_servers:
-            if cli_name == "claude" and self.claude_mcp_config_path:
+            if cli_name == CLI.CLAUDE and self.claude_mcp_config_path:
                 cmd += ["--mcp-config", str(self.claude_mcp_config_path)]
-            elif cli_name == "codex":
+            elif cli_name == CLI.CODEX:
                 mcp_flags = []
                 for name, server in self.mcp_servers.items():
                     for key, value in server.items():
@@ -339,7 +350,7 @@ class Gateway:
         env = os.environ.copy()
         if "GOOGLE_CLOUD_PROJECT" in env:
             del env["GOOGLE_CLOUD_PROJECT"]
-        if cli_name == "gemini":
+        if cli_name == CLI.GEMINI:
             # Bypass folder trust prompt in headless mode (replaces --skip-trust flag).
             env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 
@@ -403,8 +414,8 @@ class Gateway:
         starting/restarting it if the conversation doesn't match what it has
         already seen (new conversation, /resume, or /mode//model change)."""
         model_name = model.split("/")[-1]
-        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS["yolo"])["claude"]
-        user_turns = [m for m in messages if m["role"] != "system"]
+        mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO])["claude"]
+        user_turns = [m for m in messages if m["role"] != Role.SYSTEM]
         if not user_turns:
             raise Exception("claude CLI execution error: no user message to send")
 
@@ -425,7 +436,7 @@ class Gateway:
         if not is_continuation:
             if self._claude_session is not None:
                 self._claude_session.close()
-            system_prompt = next((m["content"] for m in messages if m["role"] == "system"), "")
+            system_prompt = next((m["content"] for m in messages if m["role"] == Role.SYSTEM), "")
             self._claude_session = ClaudeSession(
                 model_name, mode_flags, system_prompt=system_prompt,
                 mcp_config_path=self.claude_mcp_config_path,
@@ -453,13 +464,13 @@ class Gateway:
         self._claude_history_len = len(user_turns)
         if not yielded_any:
             raise Exception("claude CLI returned no usable output.")
-        self._record_usage("claude", model, "", tier, tokens=tokens)
+        self._record_usage(CLI.CLAUDE, model, "", tier, tokens=tokens)
 
     def refresh_auth(self) -> None:
         """Re-reads all credentials after a login flow completes."""
         self.active_providers = self.scavenger.get_active_providers()
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
-        self.cli_auth_status["ollama"] = OllamaProvider.is_available()
+        self.cli_auth_status[CLI.OLLAMA] = OllamaProvider.is_available()
         self.headers = self.scavenger.get_all_headers()
 
     def _resolve_cli_and_model(
@@ -486,13 +497,13 @@ class Gateway:
         model generates them; codex has no equivalent and yields its output
         (still effectively one chunk near the end) line by line.
         """
-        if cli_name == "claude":
+        if cli_name == CLI.CLAUDE:
             yield from self._run_claude_persistent_stream(messages, model, tier, mode)
             return
 
-        stream_json = cli_name == "gemini"
+        stream_json = cli_name == CLI.GEMINI
         cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json, media_files=media_files)
-        line_parser = self._parse_gemini_stream_line if cli_name == "gemini" else None
+        line_parser = self._parse_gemini_stream_line if cli_name == CLI.GEMINI else None
 
         try:
             import pty
@@ -610,16 +621,16 @@ class Gateway:
         return priority_models + other_models + rate_limited
 
     @staticmethod
-    def _cli_for_model(model: str) -> str:
+    def _cli_for_model(model: str) -> CLI:
         """Maps a "<provider>/<model>" entry to its CLI binary name."""
         if model.startswith("gemini/"):
-            return "gemini"
+            return CLI.GEMINI
         elif model.startswith("github/") or model.startswith("codex/"):
-            return "codex"
+            return CLI.CODEX
         elif model.startswith("anthropic/"):
-            return "claude"
+            return CLI.CLAUDE
         elif model.startswith("ollama/"):
-            return "ollama"
+            return CLI.OLLAMA
         raise Exception(f"Unsupported model provider in: {model}")
 
     def _run_oss_stream(self, model: str, messages: List[Dict], tier: Optional[str] = None, media_files: List[Path] = []) -> Generator[str, None, None]:
@@ -631,7 +642,7 @@ class Gateway:
             if images:
                 messages = list(messages)
                 for i in range(len(messages) - 1, -1, -1):
-                    if messages[i].get("role") == "user":
+                    if messages[i].get("role") == Role.USER:
                         messages[i] = dict(messages[i])
                         messages[i]["images"] = images
                         break
@@ -644,7 +655,7 @@ class Gateway:
             raise Exception(f"ollama execution error: {e}")
         if not yielded_any:
             raise Exception("ollama returned no output.")
-        self._record_usage("ollama", model, "", tier)
+        self._record_usage(CLI.OLLAMA, model, "", tier)
 
     def request(
         self,
@@ -665,7 +676,7 @@ class Gateway:
         if tier is None:
             tier = self.classifier.evaluate(prompt)
 
-        messages = history + [{"role": "user", "content": prompt}]
+        messages = history + [{"role": Role.USER, "content": prompt}]
 
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
@@ -674,7 +685,7 @@ class Gateway:
                 return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
             return self._run_cli(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
 
-        models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
+        models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
 
         last_exception = None
         for model in models:
@@ -711,7 +722,7 @@ class Gateway:
         if tier is None:
             tier = self.classifier.evaluate(prompt)
 
-        messages = history + [{"role": "user", "content": prompt}]
+        messages = history + [{"role": Role.USER, "content": prompt}]
 
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
@@ -722,7 +733,7 @@ class Gateway:
                 yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
             return
 
-        models = self._prioritize_models(self.model_map.get(tier, self.model_map["medium"]))
+        models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
 
         last_exception = None
         for model in models:
