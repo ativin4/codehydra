@@ -590,3 +590,95 @@ class TestPR:
 
         msgs = [str(w) for w in app._captured]
         assert any("main" in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Patcher: atomic write and path traversal rejection
+# ---------------------------------------------------------------------------
+
+class TestPatcher:
+    def test_applies_patch_atomically(self, tmp_path):
+        from codehydra.tools.patcher import Patcher
+        target = tmp_path / "foo.py"
+        target.write_text("line 1\nline 2\nline 3\n")
+        llm_output = (
+            "File: foo.py\n"
+            "<<<<<<< SEARCH\n"
+            "line 2\n"
+            "=======\n"
+            "line TWO\n"
+            ">>>>>>> REPLACE"
+        )
+        patched = Patcher().apply_all_patches(llm_output, cwd=tmp_path)
+        assert "foo.py" in patched
+        assert "line TWO" in target.read_text()
+        # No .tmp file left behind
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_rejects_path_traversal(self, tmp_path):
+        from codehydra.tools.patcher import Patcher
+        outside = tmp_path.parent / "evil.py"
+        outside.write_text("secret\n")
+        llm_output = (
+            "File: ../evil.py\n"
+            "<<<<<<< SEARCH\n"
+            "secret\n"
+            "=======\n"
+            "pwned\n"
+            ">>>>>>> REPLACE"
+        )
+        patched = Patcher().apply_all_patches(llm_output, cwd=tmp_path)
+        assert patched == []
+        assert outside.read_text() == "secret\n"
+
+
+# ---------------------------------------------------------------------------
+# MCP server: task_id validation blocks path traversal
+# ---------------------------------------------------------------------------
+
+class TestMcpTaskId:
+    def test_invalid_task_id_rejected(self):
+        from codehydra.mcp.server import get_background_output, stop_background_task
+        for bad_id in ["../etc", "../../../../passwd", "'; rm -rf", "toolong1234"]:
+            result = get_background_output(bad_id)
+            assert "error" in result
+            result2 = stop_background_task(bad_id)
+            assert "error" in result2
+
+    def test_valid_but_unknown_task_id(self):
+        from codehydra.mcp.server import get_background_output
+        result = get_background_output("deadbeef")
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# TUI: skill path traversal blocked
+# ---------------------------------------------------------------------------
+
+class TestSkillTraversal:
+    def _make_app(self, tmp_path, monkeypatch):
+        import codehydra.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        skills_dir = tmp_path / ".codehydra" / "skills"
+        skills_dir.mkdir(parents=True)
+        monkeypatch.setattr(tui_mod, "SKILLS_DIR", skills_dir)
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app._captured = captured
+        return app, skills_dir
+
+    def test_skill_traversal_blocked(self, tmp_path, monkeypatch):
+        import codehydra.tui as tui_mod
+        app, skills_dir = self._make_app(tmp_path, monkeypatch)
+        # Place a file outside skills dir that traversal could reach
+        outside = tmp_path / "secret.md"
+        outside.write_text("secret content")
+        app._handle_command("/skill ../../secret")
+        msgs = [str(w) for w in app._captured]
+        assert any("Invalid" in m or "not found" in m.lower() for m in msgs)
+        # Should not have exposed secret content
+        assert not any("secret content" in m for m in msgs)
