@@ -359,7 +359,10 @@ class HydraApp(App):
 
     def _refresh_system_msg(self) -> None:
         """Rebuild history[0] with current memory file content prepended."""
-        memory = MEMORY_FILE.read_text().strip() if MEMORY_FILE.exists() else ""
+        try:
+            memory = MEMORY_FILE.read_text().strip() if MEMORY_FILE.exists() else ""
+        except Exception:
+            memory = ""
         if memory:
             full = f"## Project Memory\n{memory}\n\n---\n\n{self.system_msg}"
         else:
@@ -872,6 +875,7 @@ class HydraApp(App):
         editor_parts = shlex.split(editor)
         area = self.query_one("#input-area", TextArea)
         current = area.text
+        tmp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
                 f.write(current)
@@ -883,7 +887,8 @@ class HydraApp(App):
         except Exception as e:
             self._add_message(Text(f"Editor error: {e}", style="red"))
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str, media_files: list[Path] | None = None) -> None:
