@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 import uuid
@@ -29,8 +30,15 @@ class SessionManager:
     def save(self, session_id: str, state: Dict[str, Any]) -> None:
         payload = {**state, "updated_at": time.time()}
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._path(session_id), "w") as f:
-            json.dump(payload, f, indent=2)
+        target = self._path(session_id)
+        tmp = target.with_suffix(".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp, target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -57,22 +65,28 @@ class SessionManager:
             return None
 
     def list_sessions(self) -> List[Dict[str, Any]]:
-        """Returns session summaries, newest first."""
+        """Returns session summaries, newest first. Reads only metadata, not full history."""
         sessions = []
         for path in self.sessions_dir.glob("*.json"):
-            data = self.load(path.stem)
-            if not data:
+            if path.suffix == ".tmp":
                 continue
-            preview = ""
-            for msg in data.get("history", []):
-                if msg.get("role") == "user":
-                    preview = msg["content"][:60]
-                    break
-            sessions.append({
-                "id": path.stem,
-                "updated_at": data.get("updated_at", 0),
-                "preview": preview,
-            })
+            try:
+                with open(path, "r") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    continue
+                preview = ""
+                for msg in data.get("history", []):
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        preview = str(msg.get("content", ""))[:60]
+                        break
+                sessions.append({
+                    "id": path.stem,
+                    "updated_at": data.get("updated_at", 0),
+                    "preview": preview,
+                })
+            except Exception:
+                continue
         return sorted(sessions, key=lambda s: s["updated_at"], reverse=True)
 
     def latest_session_id(self, exclude: Optional[str] = None) -> Optional[str]:

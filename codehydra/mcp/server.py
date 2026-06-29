@@ -10,6 +10,7 @@ they don't get this server themselves.
 """
 import json
 import os
+import re as _re
 import shlex
 import signal
 import subprocess
@@ -17,6 +18,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
+
+_TASK_ID_RE = _re.compile(r"^[0-9a-f]{8}$")
+_MAX_DISPATCH_WORKERS = 8
 
 from mcp.server.fastmcp import FastMCP
 from codehydra.routing.gateway import Gateway
@@ -53,7 +57,7 @@ def dispatch_agents(tasks: List[str], tier: str = "medium") -> List[str]:
         except Exception as e:
             return f"Error: {e}"
 
-    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as executor:
+    with ThreadPoolExecutor(max_workers=min(_MAX_DISPATCH_WORKERS, max(1, len(tasks)))) as executor:
         return list(executor.map(run, tasks))
 
 
@@ -63,7 +67,7 @@ def _is_running(pid: int) -> bool:
     try:
         if os.waitpid(pid, os.WNOHANG)[0] != 0:
             return False
-    except ChildProcessError:
+    except (ChildProcessError, PermissionError):
         pass
 
     try:
@@ -119,6 +123,8 @@ def get_background_output(task_id: str, tail: int = 100) -> dict:
     Returns:
         {"command": ..., "running": bool, "output": "..."}
     """
+    if not _TASK_ID_RE.match(task_id):
+        return {"error": f"Invalid task id: {task_id!r}"}
     task_dir = BG_DIR / task_id
     meta_path = task_dir / "meta.json"
     if not meta_path.exists():
@@ -168,6 +174,8 @@ def stop_background_task(task_id: str) -> dict:
     Returns:
         {"status": "stopped"} or {"status": "already stopped"} or {"error": ...}
     """
+    if not _TASK_ID_RE.match(task_id):
+        return {"error": f"Invalid task id: {task_id!r}"}
     task_dir = BG_DIR / task_id
     meta_path = task_dir / "meta.json"
     if not meta_path.exists():

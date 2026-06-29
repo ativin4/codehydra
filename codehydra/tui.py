@@ -688,6 +688,14 @@ class HydraApp(App):
             skill_name = parts[1]
             skill_prompt = parts[2].strip() if len(parts) > 2 else ""
             skill_file = SKILLS_DIR / f"{skill_name}.md"
+            try:
+                skill_file = skill_file.resolve()
+                if not skill_file.is_relative_to(SKILLS_DIR.resolve()):
+                    self._add_message(Text("Invalid skill name.", style="red"))
+                    return
+            except Exception:
+                self._add_message(Text("Invalid skill name.", style="red"))
+                return
             if not skill_file.exists():
                 names = _skill_names()
                 hint = f"  Available: {', '.join(names)}" if names else f"  No skills in {SKILLS_DIR}/"
@@ -1262,6 +1270,9 @@ class HydraApp(App):
         )
         auth = self.gateway.cli_auth_status
         best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
+        if not best_cli:
+            self.call_from_thread(self._add_message, Text("No CLI available to generate description.", style="red"))
+            return
         try:
             raw = self.gateway.request(
                 prompt, tier="low", history=[], cli_override=best_cli, mode=Mode.PLAN,

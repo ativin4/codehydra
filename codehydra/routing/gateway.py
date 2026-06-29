@@ -429,10 +429,11 @@ class Gateway:
                 cmd[flag_pos:flag_pos] = mcp_flags
             # agy reads mcpServers from .agy/settings.json automatically.
 
-        # Prepare a clean environment for the subprocess
+        # Prepare a clean environment for the subprocess.
+        # Strip GOOGLE_CLOUD_PROJECT: agy picks it up and routes to the wrong
+        # Vertex project instead of using the OAuth session credentials.
         env = os.environ.copy()
-        if "GOOGLE_CLOUD_PROJECT" in env:
-            del env["GOOGLE_CLOUD_PROJECT"]
+        env.pop("GOOGLE_CLOUD_PROJECT", None)
         if cli_name == CLI.AGY:
             # Bypass folder trust prompt in headless mode (replaces --skip-trust flag).
             env["AGY_CLI_TRUST_WORKSPACE"] = "true"

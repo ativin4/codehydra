@@ -181,14 +181,9 @@ class Scavenger:
 
     def apply_to_env(self):
         """Applies scavenged credentials to environment variables for tools that expect them."""
-        # For Google ADC, if we have a project ID, set it
-        hdrs = self.get_google_headers()
-        if "x-goog-user-project" in hdrs:
-            os.environ["GOOGLE_CLOUD_PROJECT"] = hdrs["x-goog-user-project"]
-        
-        # We don't want to set ANTHROPIC_API_KEY if we are using session tokens
-        # but some tools might need a dummy key to bypass initial checks
-        # os.environ["ANTHROPIC_API_KEY"] = "sk-ant-session-bypass"
+        # GOOGLE_CLOUD_PROJECT is intentionally NOT propagated here: agy CLI
+        # picks it up and sends requests to the wrong project. Gateway._build_cmd
+        # strips it from subprocess envs anyway; leave the process env clean.
 
 if __name__ == "__main__":
     import sys as _sys
