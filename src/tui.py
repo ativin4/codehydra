@@ -912,7 +912,10 @@ class HydraApp(App):
                             last_md_push = now
             except Exception as e:
                 if thinking_w is not None:
-                    self.call_from_thread(thinking_w.remove)
+                    # Collapse the thinking indicator rather than vanishing it,
+                    # so the user sees the model was mid-thought when it failed.
+                    self.call_from_thread(thinking_w.set_classes, "thinking-done")
+                    self.call_from_thread(thinking_w.update, "↓ Thinking interrupted")
                 self.call_from_thread(md_w.update, f"**Error:** {e}")
                 return
 
@@ -920,6 +923,10 @@ class HydraApp(App):
             if response:
                 self.call_from_thread(md_w.update, response)
                 self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+            else:
+                # Model produced no text (thinking-only or empty output).
+                # Remove the blank Markdown widget to avoid empty whitespace.
+                self.call_from_thread(md_w.remove)
 
             usage = self.gateway.last_usage
             if usage:
@@ -928,8 +935,12 @@ class HydraApp(App):
                 self.call_from_thread(self._add_message, Text(tag, style="dim"))
             self.call_from_thread(self._update_status)
 
+            # Always record the user turn. Only record the assistant turn if
+            # there is actual content — an empty string confuses LLMs on the
+            # next turn and causes API validation errors on some providers.
             self.history.append({"role": Role.USER, "content": prompt})
-            self.history.append({"role": Role.ASSISTANT, "content": response})
+            if response:
+                self.history.append({"role": Role.ASSISTANT, "content": response})
             if usage:
                 self.usage_log.append(usage)
             self._save_session()
