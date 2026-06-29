@@ -71,6 +71,8 @@ SLASH_COMMANDS = [
     "/memory", "/remember", "/forget",
     "/search",
     "/doctor",
+    "/commit",
+    "/pr",
 ]
 
 HELP_TEXT = """\
@@ -115,7 +117,12 @@ HELP_TEXT = """\
 | `/cost` | Per-turn CLI/model/tier and token usage |
 | `/clear` | Reset conversation history |
 
+**Git**
+| `/commit [msg]` | Stage all + AI commit message (or pass your own) |
+| `/pr [title]` | Generate PR description, push branch, create PR via `gh` |
+
 **Input**
+| `Tab` | Autocomplete `@path` file reference |
 | `Ctrl+Enter` | Insert newline (multi-line prompt) |
 | `Ctrl+E` | Open prompt in `$EDITOR` (Vim/Nano/VSCode etc.) |
 | `↑` / `↓` | Navigate prompt history |
@@ -168,6 +175,10 @@ class PromptTextArea(TextArea):
             event.prevent_default()
             event.stop()
             self.insert("\n")
+        elif event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            self.app._complete_at_ref()
         elif event.key == "ctrl+e":
             event.prevent_default()
             event.stop()
@@ -739,6 +750,12 @@ class HydraApp(App):
             self._add_message(Markdown(HELP_TEXT))
         elif cmd == "doctor":
             self._run_doctor()
+        elif cmd.startswith("commit"):
+            msg_override = user_input[len("/commit"):].strip()
+            self._run_commit(msg_override)
+        elif cmd.startswith("pr"):
+            title_override = user_input[len("/pr"):].strip()
+            self._run_pr(title_override)
         else:
             self._add_message(Text(f"Unknown command: {cmd}", style="red"))
 
@@ -807,6 +824,45 @@ class HydraApp(App):
         session_line = Text(f"✓ Session: {self.session_id}", style="dim")
 
         self._add_message(Group(table, Text(""), mcp_line, mem_line, skill_line, session_line))
+
+    _AT_PARTIAL_RE = re.compile(r"@([\w./\-]*)$")
+
+    def _complete_at_ref(self) -> None:
+        """Tab-complete @path tokens in the input area."""
+        area = self.query_one("#input-area", TextArea)
+        text = area.text
+        row, col = area.cursor_location
+        lines = text.split("\n")
+        line = lines[row] if row < len(lines) else ""
+        before = line[:col]
+        m = self._AT_PARTIAL_RE.search(before)
+        if not m:
+            area.insert("    ")
+            return
+        partial = m.group(1)
+        cwd = Path.cwd()
+        try:
+            if not partial or partial.endswith("/"):
+                candidates = sorted((cwd / partial).glob("*") if partial else cwd.glob("*"))[:8]
+            else:
+                parent = Path(partial).parent
+                stem = Path(partial).name
+                candidates = sorted((cwd / parent).glob(f"{stem}*"))[:8]
+        except Exception:
+            return
+        if not candidates:
+            return
+        best = candidates[0]
+        try:
+            rel = str(best.relative_to(cwd))
+        except ValueError:
+            rel = str(best)
+        if best.is_dir():
+            rel += "/"
+        new_before = before[: m.start()] + f"@{rel}"
+        lines[row] = new_before + line[col:]
+        area.text = "\n".join(lines)
+        area.move_cursor((row, len(new_before)))
 
     def _open_in_editor(self) -> None:
         """Open current prompt in $EDITOR (Ctrl+E). Suspends TUI, restores text after."""
@@ -1120,6 +1176,124 @@ class HydraApp(App):
             self.history.append({"role": Role.USER, "content": prompt})
             self.history.append({"role": Role.ASSISTANT, "content": f"[Compare]\n{combined}"})
         self._save_session()
+
+
+    @work(thread=True, group="git")
+    def _run_commit(self, message_override: str = "") -> None:
+        check = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, text=True)
+        if check.returncode != 0:
+            self.call_from_thread(self._add_message, Text("Not a git repository.", style="red"))
+            return
+
+        diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
+        if not diff.strip():
+            self.call_from_thread(self._add_message, Text("Staging all changes…", style="dim yellow"))
+            subprocess.run(["git", "add", "-A"], capture_output=True)
+            diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
+            if not diff.strip():
+                self.call_from_thread(self._add_message, Text("Nothing to commit.", style="dim"))
+                return
+
+        if message_override:
+            commit_msg = message_override
+        else:
+            self.call_from_thread(self._add_message, Text("Generating commit message…", style="dim yellow"))
+            prompt = (
+                "Write a conventional commit message for this diff.\n"
+                "Format: type(scope): short description\n"
+                "Types: feat, fix, refactor, docs, test, chore\n"
+                "Rules: imperative mood, max 72 chars, no period, no quotes.\n"
+                "Reply with ONLY the commit message, nothing else.\n\n"
+                f"```diff\n{diff[:4000]}\n```"
+            )
+            auth = self.gateway.cli_auth_status
+            best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
+            if not best_cli:
+                self.call_from_thread(self._add_message, Text("No CLI available to generate message.", style="red"))
+                return
+            try:
+                commit_msg = self.gateway.request(
+                    prompt, tier="low", history=[], cli_override=best_cli, mode=Mode.PLAN,
+                ).strip().strip('"').strip("'")
+            except Exception as e:
+                self.call_from_thread(self._add_message, Text(f"Message generation failed: {e}", style="red"))
+                return
+
+        result = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
+        if result.returncode == 0:
+            self.call_from_thread(self._add_message, Text(f"✓ {commit_msg}", style="green"))
+        else:
+            self.call_from_thread(self._add_message, Text(f"✗ {result.stderr.strip()}", style="red"))
+
+    @work(thread=True, group="git")
+    def _run_pr(self, title_override: str = "") -> None:
+        if not shutil.which("gh"):
+            self.call_from_thread(self._add_message, Text("'gh' not found. Install: https://cli.github.com/", style="red"))
+            return
+
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], capture_output=True, text=True,
+        ).stdout.strip()
+        if not branch or branch in ("main", "master"):
+            self.call_from_thread(self._add_message, Text(f"Cannot create PR from branch: {branch or '(detached)'}", style="red"))
+            return
+
+        log = subprocess.run(
+            ["git", "log", "main..HEAD", "--oneline"], capture_output=True, text=True,
+        ).stdout.strip()
+        if not log:
+            self.call_from_thread(self._add_message, Text("No commits ahead of main.", style="dim"))
+            return
+
+        diff_stat = subprocess.run(
+            ["git", "diff", "main...HEAD", "--stat"], capture_output=True, text=True,
+        ).stdout.strip()
+
+        self.call_from_thread(self._add_message, Text("Generating PR description…", style="dim yellow"))
+        prompt = (
+            "Write a GitHub pull request title and description.\n\n"
+            f"Branch: {branch}\nCommits:\n{log}\nFiles changed:\n{diff_stat}\n\n"
+            "Reply in this exact format:\n"
+            "TITLE: <title under 70 chars>\n\n"
+            "BODY:\n<markdown with ## Summary and ## Test plan sections>"
+        )
+        auth = self.gateway.cli_auth_status
+        best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
+        try:
+            raw = self.gateway.request(
+                prompt, tier="low", history=[], cli_override=best_cli, mode=Mode.PLAN,
+            ).strip()
+        except Exception as e:
+            self.call_from_thread(self._add_message, Text(f"Description generation failed: {e}", style="red"))
+            return
+
+        title = title_override
+        body = raw
+        if not title_override:
+            for line in raw.splitlines():
+                if line.startswith("TITLE:"):
+                    title = line[6:].strip()
+                    break
+            body_start = raw.find("BODY:")
+            if body_start >= 0:
+                body = raw[body_start + 5:].strip()
+        if not title:
+            title = branch.replace("-", " ").replace("_", " ")
+
+        self.call_from_thread(self._add_message, Text(f"Pushing {branch}…", style="dim yellow"))
+        push = subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, text=True)
+        if push.returncode != 0:
+            self.call_from_thread(self._add_message, Text(f"Push failed: {push.stderr.strip()}", style="red"))
+            return
+
+        result = subprocess.run(
+            ["gh", "pr", "create", "--title", title, "--body", body],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            self.call_from_thread(self._add_message, Text(f"✓ {result.stdout.strip()}", style="green"))
+        else:
+            self.call_from_thread(self._add_message, Text(f"✗ {result.stderr.strip()}", style="red"))
 
 
 if __name__ == "__main__":

@@ -437,3 +437,156 @@ class TestCloudCLI:
             cli_override="claude",
         )
         assert "pathlib" in result.lower() or "python" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# @file Tab autocomplete
+# ---------------------------------------------------------------------------
+
+class TestAtFileComplete:
+    def _make_app(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        return app
+
+    def test_at_partial_re_matches_partial_path(self, tmp_path, monkeypatch):
+        import re
+        import src.tui as tui_mod
+        m = tui_mod.HydraApp._AT_PARTIAL_RE.search("describe @src/rout")
+        assert m is not None
+        assert m.group(1) == "src/rout"
+
+    def test_at_partial_re_no_match_url(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        m = tui_mod.HydraApp._AT_PARTIAL_RE.search("@https://example.com")
+        assert m is None or "https" not in m.group(1)
+
+    def test_at_partial_re_no_match_mid_word(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        m = tui_mod.HydraApp._AT_PARTIAL_RE.search("@foo bar")
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# /commit: AI commit message generation
+# ---------------------------------------------------------------------------
+
+class TestCommit:
+    def _make_app(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        app.cli_override = None
+        app.model_override = None
+        app.effort_tier = None
+        mock_gw = MagicMock()
+        mock_gw.cli_auth_status = {"claude": True, "agy": False, "codex": False, "ollama": False}
+        app.gateway = mock_gw
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app.call_from_thread = lambda fn, *a, **kw: fn(*a, **kw)
+        app._captured = captured
+        return app
+
+    def test_commit_with_message_override(self, tmp_path, monkeypatch):
+        import subprocess as sp
+        app = self._make_app(tmp_path, monkeypatch)
+
+        calls = []
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            r = MagicMock()
+            if "rev-parse" in cmd:
+                r.returncode = 0
+            elif "diff" in cmd and "--cached" in cmd:
+                r.returncode = 0
+                r.stdout = "diff --git a/foo.py ...\n+added line"
+            elif "commit" in cmd:
+                r.returncode = 0
+                r.stdout = ""
+                r.stderr = ""
+            else:
+                r.returncode = 0
+                r.stdout = ""
+            return r
+
+        with patch("src.tui.subprocess.run", side_effect=fake_run):
+            app._run_commit.__wrapped__(app, "fix: my message")
+
+        commit_calls = [c for c in calls if "commit" in c]
+        assert commit_calls, "git commit not called"
+        assert "fix: my message" in commit_calls[0]
+
+    def test_commit_nothing_to_commit(self, tmp_path, monkeypatch):
+        app = self._make_app(tmp_path, monkeypatch)
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
+        with patch("src.tui.subprocess.run", side_effect=fake_run):
+            app._run_commit.__wrapped__(app, "")
+
+        msgs = [str(w) for w in app._captured]
+        assert any("Nothing" in m or "nothing" in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# /pr: PR description and creation
+# ---------------------------------------------------------------------------
+
+class TestPR:
+    def _make_app(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        app.cli_override = None
+        app.effort_tier = None
+        app.mode = "yolo"
+        mock_gw = MagicMock()
+        mock_gw.cli_auth_status = {"claude": True, "agy": False, "codex": False, "ollama": False}
+        mock_gw.request.return_value = "TITLE: feat: cool feature\n\nBODY:\n## Summary\n- Added thing"
+        app.gateway = mock_gw
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app.call_from_thread = lambda fn, *a, **kw: fn(*a, **kw)
+        app._captured = captured
+        return app
+
+    def test_pr_no_gh_cli(self, tmp_path, monkeypatch):
+        app = self._make_app(tmp_path, monkeypatch)
+        with patch("src.tui.shutil.which", return_value=None):
+            app._run_pr.__wrapped__(app, "")
+        msgs = [str(w) for w in app._captured]
+        assert any("gh" in m.lower() for m in msgs)
+
+    def test_pr_on_main_blocked(self, tmp_path, monkeypatch):
+        import subprocess as sp
+        app = self._make_app(tmp_path, monkeypatch)
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = "main"
+            r.stderr = ""
+            return r
+
+        with patch("src.tui.shutil.which", return_value="/usr/bin/gh"), \
+             patch("src.tui.subprocess.run", side_effect=fake_run):
+            app._run_pr.__wrapped__(app, "")
+
+        msgs = [str(w) for w in app._captured]
+        assert any("main" in m for m in msgs)
