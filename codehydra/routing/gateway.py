@@ -24,6 +24,11 @@ from codehydra.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_bas
 _SHARED_MCP: Dict = {}
 _SHARED_MCP_LOCK = threading.Lock()
 
+# Shared rate-limit state so parallel Gateway instances respect each other's
+# rate limits and don't pile requests onto a CLI that's already throttled.
+_SHARED_RATE_LIMITED: Dict[str, float] = {}
+_SHARED_RATE_LOCK = threading.Lock()
+
 
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
@@ -108,7 +113,6 @@ class Gateway:
         self._claude_history_len = 0
         self.classifier = Classifier()
         self.last_usage: Optional[Dict] = None
-        self._rate_limited_until: Dict[str, float] = {}
 
         # Start the shared HTTP MCP server (once per process) so all CLIs
         # connect to the same long-running server rather than spawning a new
@@ -220,34 +224,42 @@ class Gateway:
         - codex: no file needed; servers are passed per-invocation as
           `-c mcp_servers.<name>.*` overrides (see _build_cmd).
         """
-        if not self.mcp_servers:
-            return None
-
         claude_config_path = Path(".codehydra") / "mcp-config.json"
-        self._write_json_if_changed(claude_config_path, {"mcpServers": self.mcp_servers})
+        if self.mcp_servers:
+            self._write_json_if_changed(claude_config_path, {"mcpServers": self.mcp_servers})
 
         gemini_settings_path = Path(".agy") / "settings.json"
-        settings = {}
+        settings: Dict = {}
         if gemini_settings_path.exists():
             try:
                 with open(gemini_settings_path, "r") as f:
-                    settings = json.load(f)
+                    loaded = json.load(f)
+                    settings = loaded if isinstance(loaded, dict) else {}
             except Exception:
                 settings = {}
-        # When codehydra-tools runs as a persistent HTTP server we can give agy
-        # the URL directly — no subprocess spawn, no startup latency.
-        # For stdio entries we still exclude them to avoid the 3-5 s spawn cost.
+
+        # Sanitise null values that could crash .update()/.items() calls below.
+        if not isinstance(settings.get("mcpServers"), dict):
+            settings.pop("mcpServers", None)
+        if not isinstance(settings.get("general"), dict):
+            settings.pop("general", None)
+        if not isinstance(settings.get("ui"), dict):
+            settings.pop("ui", None)
+
+        # When codehydra-tools runs as a persistent HTTP server give agy the URL
+        # directly — no subprocess spawn, no startup latency. Stdio entries are
+        # excluded to avoid the 3-5s spawn cost on every invocation.
         http_mcp = {k: v for k, v in self.mcp_servers.items() if "url" in v}
-        user_mcp = {k: v for k, v in settings.get("mcpServers", {}).items()
-                    if k not in self.mcp_servers}
+        # Preserve any user-defined MCP servers that aren't codehydra-managed.
+        existing = settings.get("mcpServers") or {}
+        user_mcp = {k: v for k, v in existing.items() if k not in self.mcp_servers}
         combined_mcp = {**http_mcp, **user_mcp}
         if combined_mcp:
             settings["mcpServers"] = combined_mcp
         else:
             settings.pop("mcpServers", None)
-        # Disable blocking startup checks. Key names from official settings schema:
-        # general.enableAutoUpdate blocks on version check; ui.renderProcess
-        # starts an Ink render subprocess we don't need in headless mode.
+
+        # Disable blocking startup checks.
         settings.setdefault("general", {}).update({
             "enableAutoUpdate": False,
             "enableAutoUpdateNotification": False,
@@ -255,7 +267,7 @@ class Gateway:
         settings.setdefault("ui", {})["renderProcess"] = False
         self._write_json_if_changed(gemini_settings_path, settings)
 
-        return claude_config_path
+        return claude_config_path if self.mcp_servers else None
 
     @staticmethod
     def _write_json_if_changed(path: Path, data: Dict) -> None:
@@ -444,25 +456,26 @@ class Gateway:
         return cls._ANSI_RE.sub("", text)
 
     def _mark_rate_limited(self, cli_name: str, seconds: int = _RATE_LIMIT_COOLDOWN) -> None:
-        self._rate_limited_until[cli_name] = time.time() + seconds
+        with _SHARED_RATE_LOCK:
+            _SHARED_RATE_LIMITED[cli_name] = time.time() + seconds
 
     def is_rate_limited(self, cli_name: str) -> bool:
-        return time.time() < self._rate_limited_until.get(cli_name, 0)
+        with _SHARED_RATE_LOCK:
+            return time.time() < _SHARED_RATE_LIMITED.get(cli_name, 0)
 
     def rate_limit_resets_in(self, cli_name: str) -> Optional[int]:
         """Seconds until cooldown expires, or None if not rate-limited."""
-        remaining = self._rate_limited_until.get(cli_name, 0) - time.time()
+        with _SHARED_RATE_LOCK:
+            remaining = _SHARED_RATE_LIMITED.get(cli_name, 0) - time.time()
         return int(remaining) + 1 if remaining > 0 else None
 
     _NOISE_PREFIXES = (
         "[ExtensionManager]", "[MCP]", "[mcp]", "Connecting to MCP",
         "Connected to MCP", "MCP server", "MCP issues", "Starting MCP",
-        # mcp-remote (OAuth proxy for remote MCP servers like growwmcp)
         "Proxy server listening", "Starting MCP proxy", "mcp-remote",
         "Loaded tokens", "Token stored", "Opening browser",
         "Authorization URL", "Waiting for OAuth", "OAuth callback",
-        # agy startup noise
-        "[ExtensionManager]", "Loading extension", "Extension loaded",
+        "Loading extension", "Extension loaded",
     )
     _NOISE_SUBSTRINGS = (
         "MCP issues detected", "mcp-remote", "growwmcp", "chrome-devtools",
@@ -652,11 +665,12 @@ class Gateway:
             
             sel = selectors.DefaultSelector()
             sel.register(master_fd, selectors.EVENT_READ)
-            
+
             yielded_any = False
             tokens = None
             buffer = b""
-            
+            last_output_time = time.time()
+
             try:
                 # Keep reading as long as the process is alive OR there is data to read
                 while True:
@@ -668,7 +682,8 @@ class Gateway:
                             if not data:
                                 break  # EOF reached
                             buffer += data
-                            
+                            last_output_time = time.time()
+
                             while b'\n' in buffer:
                                 line_bytes, buffer = buffer.split(b'\n', 1)
                                 line = self._strip_ansi(line_bytes.decode('utf-8', errors='replace').strip())
@@ -682,16 +697,23 @@ class Gateway:
                                         tokens = line_tokens
                                 else:
                                     chunk = line
-                                    
+
                                 if chunk:
                                     yielded_any = True
+                                    last_output_time = time.time()
                                     yield chunk
-                                    
+
                         except OSError:
-                            break # Master fd closed or EOF
+                            break  # Master fd closed or EOF
                     elif process.poll() is not None:
-                        break # Process finished and no more data
-                
+                        break  # Process finished and no more data
+                    elif time.time() - last_output_time > self._CLI_TIMEOUT:
+                        process.kill()
+                        raise Exception(
+                            f"{cli_name} CLI timed out ({self._CLI_TIMEOUT}s with no output) "
+                            f"— likely waiting for auth. Run /login {cli_name}."
+                        )
+
                 # Flush remaining buffer if it doesn't end in newline
                 if buffer:
                     line = buffer.decode('utf-8', errors='replace').strip()
@@ -709,7 +731,11 @@ class Gateway:
             finally:
                 sel.close()
                 os.close(master_fd)
-                process.wait()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
 
             if process.returncode != 0 and not yielded_any:
                 raise Exception(f"{cli_name} CLI failed")
@@ -775,13 +801,37 @@ class Gateway:
                         messages[i] = dict(messages[i])
                         messages[i]["images"] = images
                         break
+        import queue as _queue
+        chunk_q: "_queue.Queue[object]" = _queue.Queue()
+        _DONE = object()
+        _ERR = object()
+
+        def _generate():
+            try:
+                for chunk in OllamaProvider.generate(model_name, messages):
+                    chunk_q.put(chunk)
+                chunk_q.put(_DONE)
+            except Exception as e:
+                chunk_q.put((_ERR, e))
+
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
         yielded_any = False
-        try:
-            for chunk in OllamaProvider.generate(model_name, messages):
-                yielded_any = True
-                yield chunk
-        except Exception as e:
-            raise Exception(f"ollama execution error: {e}")
+        while True:
+            try:
+                item = chunk_q.get(timeout=self._CLI_TIMEOUT)
+            except _queue.Empty:
+                raise Exception(
+                    f"ollama timed out ({self._CLI_TIMEOUT}s) — server stalled or unreachable."
+                )
+            if item is _DONE:
+                break
+            if isinstance(item, tuple) and item[0] is _ERR:
+                raise Exception(f"ollama execution error: {item[1]}")
+            yielded_any = True
+            yield item  # type: ignore[misc]
+
         if not yielded_any:
             raise Exception("ollama returned no output.")
         self._record_usage(CLI.OLLAMA, model, "", tier)
