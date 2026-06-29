@@ -3,7 +3,7 @@ from enum import StrEnum
 
 class CLI(StrEnum):
     CLAUDE = "claude"
-    GEMINI = "gemini"
+    AGY = "agy"
     CODEX = "codex"
     OLLAMA = "ollama"
 

@@ -19,7 +19,7 @@ This document outlines the phased development strategy, milestones, and verifica
 * **Target File:** `src/routing/gateway.py`
 * **Deliverables:**
   * Initialize a `litellm` orchestration wrapper.
-  * Map effort tiers (`low`, `medium`, `high`) to underlying models (`gemini-1.5-flash`, `claude-3-5-sonnet`, `claude-3-opus`).
+  * Map effort tiers (`low`, `medium`, `high`) to underlying models (`agy-1.5-flash`, `claude-3-5-sonnet`, `claude-3-opus`).
   * Implement `429 RateLimitError` exception handling to automatically rotate providers and headers mid-flight.
 * **Verification Gate:** Mock a rate limit error on an Anthropic endpoint and confirm the router seamlessly completes the request via an active Gemini token.
 
@@ -76,8 +76,8 @@ This document outlines the phased development strategy, milestones, and verifica
 ### Milestone 4.1: Agentic Passthrough + `/cli` Override
 * **Target Files:** `src/routing/gateway.py`, `src/cli.py`
 * **Deliverables:**
-  * Let the chosen backend CLI (`claude`/`gemini`/`codex`) edit files directly in agentic mode (appropriate auto-approve/yolo flags) instead of relying solely on the regex SEARCH/REPLACE patcher.
-  * Add `/cli <claude|gemini|codex|auto>` to pin the backend for the session, mirroring `/effort`.
+  * Let the chosen backend CLI (`claude`/`agy`/`codex`) edit files directly in agentic mode (appropriate auto-approve/yolo flags) instead of relying solely on the regex SEARCH/REPLACE patcher.
+  * Add `/cli <claude|agy|codex|auto>` to pin the backend for the session, mirroring `/effort`.
   * Add `/model <name>` to pin an explicit model, bypassing `MODEL_MAP`.
 
 ### Milestone 4.2: Streaming Output
@@ -101,7 +101,7 @@ This document outlines the phased development strategy, milestones, and verifica
 * **Target Files:** `src/mcp/config.py` (new), `src/routing/gateway.py`, `.agentrc.toml`
 * **Deliverables:**
   * Load MCP servers declared in `.agentrc.toml` (`[mcp.servers.<name>]`).
-  * Pass them through to whichever backend CLI is active via its native MCP config: claude (`--mcp-config`), gemini (`.gemini/settings.json`), codex (`-c mcp_servers.<name>.*` overrides).
+  * Pass them through to whichever backend CLI is active via its native MCP config: claude (`--mcp-config`), agy (`.agy/settings.json`), codex (`-c mcp_servers.<name>.*` overrides).
 
 ### Milestone 4.6: Packaging & Distribution
 * **Target Files:** `pyproject.toml`, `.github/workflows/`

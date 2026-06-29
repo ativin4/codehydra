@@ -7,11 +7,11 @@
 
 ## ⚡ Core Superpowers
 
-- **Subscription Scavenging**: Automatically finds and uses tokens from `Claude Code`, `Gemini CLI`, `GitHub Copilot`/`Codex`, and `Google Cloud ADC`.
+- **Subscription Scavenging**: Automatically finds and uses tokens from `Claude Code`, `Agy CLI`, `GitHub Copilot`/`Codex`, and `Google Cloud ADC`.
 - **OSS Model Fallback**: Falls back to [Ollama](https://ollama.com) (local or cloud) during rate-limits or refresh windows — set `OLLAMA_HOST` for a remote instance; no subscription gap means no conversation interruption.
-- **Multi-CLI Gateway**: Routes each turn to `claude`, `gemini`, `codex`, or `ollama` based on effort tier and which subscriptions/daemons are active, with automatic fallback if one fails.
+- **Multi-CLI Gateway**: Routes each turn to `claude`, `agy`, `codex`, or `ollama` based on effort tier and which subscriptions/daemons are active, with automatic fallback if one fails.
 - **Agentic Passthrough**: The chosen CLI edits files directly (auto-approve/yolo mode) — no fragile diff-parsing required.
-- **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`gemini` produce them (via `stream-json`).
+- **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`agy` produce them (via `stream-json`).
 - **Persistent Claude Session**: `claude` runs as a long-lived `stream-json` process, reused across turns - only the first turn pays CLI startup cost, and `/mode`/`/model` changes or a new conversation transparently restart it.
 - **Claude Code-style TUI**: A scrollable history pane with a pinned input box at the bottom, built with `textual`.
 - **Self-Healing Loop**: If the agent makes a change that breaks your build, it reads the `stderr` and fixes it automatically.
@@ -56,10 +56,10 @@ command = "pytest" # or "npm run build", "go build", etc.
 | Command | Action |
 |---------|--------|
 | `/effort <low\|medium\|high>` | Set the effort tier (affects model choice) |
-| `/cli <auto\|claude\|gemini\|codex\|ollama>` | Pin the backend CLI for the session |
+| `/cli <auto\|claude\|agy\|codex\|ollama>` | Pin the backend CLI for the session |
 | `/model <name\|auto>` | Pin an exact model, bypassing the routing table |
 | `/mode <plan\|yolo>` | `plan` = read-only (no edits/commands); `yolo` = auto-approve everything (default) |
-| `/login <claude\|gemini\|codex\|ollama>` | Launch auth flow (or show setup/model info for Ollama) |
+| `/login <claude\|agy\|codex\|ollama>` | Launch auth flow (or show setup/model info for Ollama) |
 | `/parallel "task 1" "task 2" ...` | Run multiple prompts concurrently (each in its own CLI process), results shown as they complete |
 | `/sessions` | List saved sessions |
 | `/resume [id]` | Resume a session (defaults to the most recent other than current) |
@@ -87,13 +87,13 @@ export OLLAMA_HOST=https://your-ollama-host
 # CodeHydra detects it automatically on next start (or /login ollama to refresh)
 ```
 
-Ollama is detected on startup and added as the last-tier fallback, activating automatically when claude/gemini/codex all fail.
+Ollama is detected on startup and added as the last-tier fallback, activating automatically when claude/agy/codex all fail.
 
 ## ⚙️ Configuration (`.agentrc.toml`)
 
 Beyond the `[build]` command, `.agentrc.toml` supports:
 
-- **MCP servers** (`[mcp.servers.<name>]`): declared servers are passed to whichever CLI is active via its native MCP config (claude `--mcp-config`, gemini `.gemini/settings.json`, codex `-c mcp_servers.*`).
+- **MCP servers** (`[mcp.servers.<name>]`): declared servers are passed to whichever CLI is active via its native MCP config (claude `--mcp-config`, agy `.agy/settings.json`, codex `-c mcp_servers.*`).
 - **Routing overrides** (`[routing]`): set a custom CLI try-order (`priority`), override the default model per CLI/tier (`[routing.models.<cli>]`), or override the auto-mode model try-order (`[routing.model_map]`).
 
 See the commented examples in `.agentrc.toml`.

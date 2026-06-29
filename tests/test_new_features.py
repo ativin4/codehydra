@@ -21,7 +21,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 class TestSlidingWindow:
-    def test_trims_old_turns_for_gemini(self):
+    def test_trims_old_turns_for_agy(self):
         from src.routing.gateway import Gateway
         gw = Gateway.__new__(Gateway)
         gw._CONTEXT_WINDOW = 4  # small window for testing
@@ -215,16 +215,18 @@ class TestBuildCmdMedia:
         gw.MODE_FLAGS = Gateway.MODE_FLAGS
         return gw
 
-    def test_gemini_gets_at_path_refs(self, tmp_path):
+    def test_agy_gets_at_path_refs(self, tmp_path):
         gw = self._make_gateway()
         img = tmp_path / "shot.png"
         img.write_bytes(b"\x89PNG" + b"\x00" * 10)
 
         messages = [{"role": "user", "content": "describe this image"}]
-        with patch("shutil.which", return_value="/usr/bin/gemini"):
-            cmd, _ = gw._build_cmd("gemini", messages, "gemini/gemini-2.5-flash",
+        with patch("shutil.which", return_value="/usr/bin/agy"):
+            cmd, _ = gw._build_cmd("agy", messages, "agy/agy-2.5-flash",
                                     media_files=[img])
-        prompt_arg = cmd[cmd.index("--prompt") + 1]
+        # agy 1.x uses --print flag (was --prompt in earlier versions)
+        flag = "--print" if "--print" in cmd else "--prompt"
+        prompt_arg = cmd[cmd.index(flag) + 1]
         assert f"@{img.absolute()}" in prompt_arg
 
     def test_claude_gets_pdf_text(self, tmp_path):
@@ -278,6 +280,74 @@ class TestBuildCmdMedia:
         assert len(last_user["images"]) == 1
         # verify it's valid base64
         base64.b64decode(last_user["images"][0])
+
+
+# ---------------------------------------------------------------------------
+# /doctor health check
+# ---------------------------------------------------------------------------
+
+class TestDoctor:
+    def _make_app(self, tmp_path, monkeypatch, mem_file=None):
+        import src.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        mem = mem_file or (tmp_path / "memory.md")
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", mem)
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        app.session_id = "test-session"
+        mock_gw = MagicMock()
+        mock_gw.cli_auth_status = {
+            "claude": True, "agy": False, "codex": False, "ollama": False
+        }
+        app.gateway = mock_gw
+        app._add_message = lambda w: None
+        return app
+
+    def test_doctor_renders_table(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        from rich.console import Group
+        from rich.table import Table
+
+        app = self._make_app(tmp_path, monkeypatch)
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app._run_doctor()
+
+        assert captured, "_run_doctor must call _add_message"
+        result = captured[0]
+        assert isinstance(result, Group)
+        assert isinstance(result._renderables[0], Table)
+
+    def test_doctor_shows_mcp_port(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        import src.routing.gateway as gw_mod
+        from rich.console import Group
+
+        monkeypatch.setattr(gw_mod, "_SHARED_MCP", {"port": 9999, "proc": None})
+        app = self._make_app(tmp_path, monkeypatch)
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app._run_doctor()
+
+        group = captured[0]
+        mcp_text = str(group._renderables[2])
+        assert "9999" in mcp_text
+
+    def test_doctor_shows_memory_when_present(self, tmp_path, monkeypatch):
+        import src.tui as tui_mod
+        from rich.console import Group
+
+        mem = tmp_path / "memory.md"
+        mem.write_text("- use pytest\n")
+        app = self._make_app(tmp_path, monkeypatch, mem_file=mem)
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app._run_doctor()
+
+        group = captured[0]
+        mem_text = str(group._renderables[3])
+        assert "memory.md" in mem_text.lower() or "Memory" in mem_text
 
 
 # ---------------------------------------------------------------------------

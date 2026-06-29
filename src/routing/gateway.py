@@ -1,9 +1,11 @@
+import socket
 import subprocess
 import shutil
 import os
 import re
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Generator, List, Dict, Optional
@@ -17,6 +19,12 @@ from src.routing.constants import CLI, Mode, Role, Tier
 from src.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_base64, pdf_to_text
 
 
+# Shared persistent MCP HTTP server (started once per process, reused by all
+# Gateway instances including parallel/compare sub-gateways).
+_SHARED_MCP: Dict = {}
+_SHARED_MCP_LOCK = threading.Lock()
+
+
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
     # aliases ("sonnet"/"haiku"/"opus", "default") that auto-resolve to the
@@ -25,16 +33,16 @@ class Gateway:
     # updating as new generations ship — override via [routing.model_map]
     # in .agentrc.toml instead of editing this code.
     MODEL_MAP = {
-        Tier.LOW:    [f"anthropic/haiku",  f"codex/default", f"gemini/gemini-2.5-flash", f"ollama/llama3.2"],
-        Tier.MEDIUM: [f"anthropic/sonnet", f"codex/default", f"gemini/gemini-2.5-pro",   f"ollama/llama3.2"],
-        Tier.HIGH:   [f"anthropic/opus",   f"codex/default", f"gemini/gemini-2.5-pro",   f"ollama/llama3.3"],
+        Tier.LOW:    ["anthropic/haiku",  "codex/default", "agy/agy-2.5-flash", "ollama/llama3.2"],
+        Tier.MEDIUM: ["anthropic/sonnet", "codex/default", "agy/agy-2.5-pro",   "ollama/llama3.2"],
+        Tier.HIGH:   ["anthropic/opus",   "codex/default", "agy/agy-2.5-pro",   "ollama/llama3.3"],
     }
 
     # Default model used for each CLI/tier when /cli pins a backend without
     # /model. Override via [routing.models.<cli>] in .agentrc.toml.
     CLI_DEFAULT_MODELS = {
         CLI.CLAUDE: {Tier.LOW: "haiku",            Tier.MEDIUM: "sonnet",          Tier.HIGH: "opus"},
-        CLI.GEMINI: {Tier.LOW: "gemini-2.5-flash", Tier.MEDIUM: "gemini-2.5-pro",  Tier.HIGH: "gemini-2.5-pro"},
+        CLI.AGY:    {Tier.LOW: "agy-2.5-flash",    Tier.MEDIUM: "agy-2.5-pro",     Tier.HIGH: "agy-2.5-pro"},
         CLI.CODEX:  {Tier.LOW: "default",          Tier.MEDIUM: "default",         Tier.HIGH: "default"},
         CLI.OLLAMA: {Tier.LOW: "llama3.2",         Tier.MEDIUM: "llama3.2",        Tier.HIGH: "llama3.3"},
     }
@@ -43,7 +51,7 @@ class Gateway:
     # for subscription detection and [routing] priority ordering.
     PROVIDER_MAP = {
         "anthropic": "anthropic",
-        "gemini":    "google",
+        "agy":       "google",
         "github":    "github",
         "codex":     "github",
         "ollama":    "ollama",
@@ -56,25 +64,23 @@ class Gateway:
     # commands. Useful for "what would you do" without touching the workspace.
     MODE_FLAGS = {
         Mode.YOLO: {
-            # acceptEdits only auto-approves file edits - Bash and MCP tool
-            # calls still prompt and hang headless. bypassPermissions is the
-            # real full-auto mode.
             CLI.CLAUDE: ["--permission-mode", "bypassPermissions"],
-            # --approval-mode auto_edit hangs headless on the workspace-trust
-            # prompt; --yolo + --skip-trust runs non-interactively.
-            CLI.GEMINI: ["--yolo", "--skip-trust"],
-            # -a never: don't escalate to the user for approval (which would
-            # hang headless) - MCP/exec tool calls run directly.
-            CLI.CODEX:  ["-s", "workspace-write", "-a", "never"],
+            # --dangerously-skip-permissions: auto-approve all tool calls headless.
+            CLI.AGY:    ["--dangerously-skip-permissions"],
+            # --dangerously-bypass-approvals-and-sandbox: headless full-auto.
+            # For exec-subcommand flags these must be inserted AFTER "exec"
+            # (see _build_cmd insert_at logic for codex).
+            CLI.CODEX:  ["--dangerously-bypass-approvals-and-sandbox"],
         },
         Mode.PLAN: {
             CLI.CLAUDE: ["--permission-mode", "plan"],
-            CLI.GEMINI: ["--approval-mode", "plan", "--skip-trust"],
-            CLI.CODEX:  ["-s", "read-only", "-a", "never"],
+            # print mode is inherently non-destructive; no extra flags needed.
+            CLI.AGY:    [],
+            CLI.CODEX:  ["-s", "read-only"],
         },
     }
 
-    # Max non-system messages passed to one-shot CLIs (gemini/codex/ollama).
+    # Max non-system messages passed to one-shot CLIs (agy/codex/ollama).
     # Claude manages its own context via persistent session.
     _CONTEXT_WINDOW = 30
 
@@ -88,7 +94,7 @@ class Gateway:
     LOGIN_COMMANDS = {
         CLI.CLAUDE: [CLI.CLAUDE, "auth", "login"],
         CLI.CODEX:  [CLI.CODEX, "login"],
-        CLI.GEMINI: [CLI.GEMINI],  # first interactive launch walks through OAuth
+        CLI.AGY:    [CLI.AGY],  # first interactive launch walks through OAuth
     }
 
     def __init__(self):
@@ -96,28 +102,23 @@ class Gateway:
         self.scavenger.apply_to_env()
         self.headers = self.scavenger.get_all_headers()
         self.active_providers = self.scavenger.get_active_providers()
-        # Per-CLI logged-in status (claude/gemini/codex), used to prioritize
-        # routing - more reliable than active_providers, which only reflects
-        # scavenged token files and can miss CLIs that manage their own auth
-        # (e.g. claude's keychain entry) or conflate unrelated tokens (e.g.
-        # a `gh` CLI login surfaces as "github" but doesn't mean codex is set up).
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
         self.cli_auth_status[CLI.OLLAMA] = OllamaProvider.is_available()
-        # Persistent `claude -p --input-format stream-json` process (see
-        # claude_session.py). _claude_history_len is the count of non-system
-        # messages sent so far; used to detect new/resumed conversations that
-        # need a fresh process instead of a continuation.
         self._claude_session: Optional["ClaudeSession"] = None
         self._claude_history_len = 0
         self.classifier = Classifier()
-        # Populated after each completed request/request_stream call with
-        # {"cli": ..., "model": ..., "tokens": int|None, "tier": ...}.
         self.last_usage: Optional[Dict] = None
-        # cli_name -> unix timestamp until which that CLI is rate-limited.
-        # Populated when a request fails with a rate-limit error; checked in
-        # _prioritize_models to skip the CLI until its window resets.
         self._rate_limited_until: Dict[str, float] = {}
-        self.mcp_servers = {**self._builtin_mcp_servers(), **load_mcp_servers()}
+
+        # Start the shared HTTP MCP server (once per process) so all CLIs
+        # connect to the same long-running server rather than spawning a new
+        # subprocess per invocation — eliminates per-turn MCP startup cost and
+        # trust prompts.
+        self._mcp_port: Optional[int] = None
+        if os.environ.get("CODEHYDRA_ENABLE_SUBAGENTS") != "0":
+            self._mcp_port = self._ensure_http_mcp_server()
+
+        self.mcp_servers = {**self._builtin_mcp_config(), **load_mcp_servers()}
         self.claude_mcp_config_path = self._write_mcp_configs()
 
         routing_cfg = load_routing_config()
@@ -133,17 +134,72 @@ class Gateway:
             if cli in self.cli_default_models and isinstance(tiers, dict):
                 self.cli_default_models[cli].update(tiers)
 
-    @staticmethod
-    def _builtin_mcp_servers() -> Dict[str, Dict]:
-        """The "codehydra-tools" MCP server (src/mcp/server.py) gives the
-        active CLI extra CodeHydra-native tools: `dispatch_agents` to fan
-        independent sub-tasks out to parallel CodeHydra-routed agents
-        (mirroring Claude Code's Task tool), and `run_in_background` /
-        `get_background_output` / `stop_background_task` for long-lived
-        processes (mirroring Claude Code's background Bash + Monitor).
-        Disabled for sub-agents themselves (CODEHYDRA_ENABLE_SUBAGENTS=0) to
-        avoid unbounded recursive fan-out.
-        """
+    @classmethod
+    def _ensure_http_mcp_server(cls) -> Optional[int]:
+        """Start the codehydra-tools HTTP MCP server if not already running.
+        Returns the port number, or None if startup failed."""
+        global _SHARED_MCP
+        with _SHARED_MCP_LOCK:
+            proc = _SHARED_MCP.get("proc")
+            port = _SHARED_MCP.get("port")
+            if proc and proc.poll() is None and port:
+                return port  # already running
+
+            # Bind to get a free port, then release so the server can claim it.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "src.mcp.server",
+                 "--transport", "streamable-http", "--port", str(port)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Wait up to 5 s for the server to accept connections.
+            deadline = time.time() + 5.0
+            ready = False
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    break  # server crashed
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                        ready = True
+                        break
+                except OSError:
+                    time.sleep(0.1)
+
+            if not ready:
+                proc.kill()
+                return None
+
+            _SHARED_MCP["proc"] = proc
+            _SHARED_MCP["port"] = port
+            return port
+
+    @classmethod
+    def close_shared_mcp_server(cls) -> None:
+        """Kill the shared HTTP MCP server. Called on app exit."""
+        global _SHARED_MCP
+        with _SHARED_MCP_LOCK:
+            proc = _SHARED_MCP.get("proc")
+            if proc and proc.poll() is None:
+                proc.kill()
+                proc.wait()  # reap to avoid zombie
+            _SHARED_MCP.clear()
+
+    def _builtin_mcp_config(self) -> Dict[str, Dict]:
+        """Returns the codehydra-tools MCP server config for use in mcp_servers.
+        Uses HTTP URL when the persistent server is running (preferred — no
+        per-invocation startup cost or trust prompts), falls back to stdio."""
+        if self._mcp_port:
+            return {
+                "codehydra-tools": {
+                    "url": f"http://127.0.0.1:{self._mcp_port}/mcp"
+                }
+            }
+        # Fallback: stdio (subagents or server startup failure)
         if os.environ.get("CODEHYDRA_ENABLE_SUBAGENTS") == "0":
             return {}
         return {
@@ -159,8 +215,8 @@ class Gateway:
 
         - claude: written to .codehydra/mcp-config.json, passed via
           --mcp-config at invocation time.
-        - gemini: merged into the project's .gemini/settings.json under
-          "mcpServers" (the only way gemini CLI picks up MCP servers).
+        - agy: merged into the project's .agy/settings.json under
+          "mcpServers" (the only way agy CLI picks up MCP servers).
         - codex: no file needed; servers are passed per-invocation as
           `-c mcp_servers.<name>.*` overrides (see _build_cmd).
         """
@@ -170,7 +226,7 @@ class Gateway:
         claude_config_path = Path(".codehydra") / "mcp-config.json"
         self._write_json_if_changed(claude_config_path, {"mcpServers": self.mcp_servers})
 
-        gemini_settings_path = Path(".gemini") / "settings.json"
+        gemini_settings_path = Path(".agy") / "settings.json"
         settings = {}
         if gemini_settings_path.exists():
             try:
@@ -178,14 +234,15 @@ class Gateway:
                     settings = json.load(f)
             except Exception:
                 settings = {}
-        # Gemini loads MCP servers synchronously at startup — each server spawns
-        # a subprocess before the first token is sent, adding ~3-5s per server.
-        # We skip injecting codehydra-tools into gemini to keep its latency low;
-        # claude and codex get MCP support via --mcp-config / -c flags instead.
+        # When codehydra-tools runs as a persistent HTTP server we can give agy
+        # the URL directly — no subprocess spawn, no startup latency.
+        # For stdio entries we still exclude them to avoid the 3-5 s spawn cost.
+        http_mcp = {k: v for k, v in self.mcp_servers.items() if "url" in v}
         user_mcp = {k: v for k, v in settings.get("mcpServers", {}).items()
                     if k not in self.mcp_servers}
-        if user_mcp:
-            settings["mcpServers"] = user_mcp
+        combined_mcp = {**http_mcp, **user_mcp}
+        if combined_mcp:
+            settings["mcpServers"] = combined_mcp
         else:
             settings.pop("mcpServers", None)
         # Disable blocking startup checks. Key names from official settings schema:
@@ -235,17 +292,11 @@ class Gateway:
         }
 
     @staticmethod
-    def _parse_gemini_stream_line(line: str) -> tuple:
-        """Returns (text_chunk, total_tokens), either of which may be None."""
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            return None, None
-        if data.get("type") == "message" and data.get("role") == Role.ASSISTANT and data.get("delta"):
-            return data.get("content"), None
-        elif data.get("type") == "result":
-            return None, (data.get("stats") or {}).get("total_tokens")
-        return None, None
+    def _parse_agy_stream_line(line: str) -> tuple:
+        """Returns (text_chunk, total_tokens) for an agy plain-text output line.
+        agy 1.x outputs plain text (no --output-format flag); each line is a
+        content chunk. Token counts are not reported by this CLI version."""
+        return line, None
 
     def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo", stream: bool = False, media_files: List[Path] = []):
         """Builds the subprocess argv + env for invoking a CLI with a prompt."""
@@ -263,10 +314,10 @@ class Gateway:
                 turns = turns[-self._CONTEXT_WINDOW:]
             messages = system + turns
 
-        # For non-gemini CLIs, inject media content as text before assembling
-        # the prompt. Gemini handles @path refs natively so we leave those for
+        # For non-agy CLIs, inject media content as text before assembling
+        # the prompt. Agy handles @path refs natively so we leave those for
         # the prompt string below.
-        if media_files and cli_name != CLI.GEMINI:
+        if media_files and cli_name != CLI.AGY:
             extra = []
             for p in media_files:
                 ext = p.suffix.lower()
@@ -289,34 +340,53 @@ class Gateway:
                         messages[i]["content"] = "\n\n".join(extra) + "\n\n" + messages[i]["content"]
                         break
 
-        # For Claude one-shot mode, extract the system message and pass it via
-        # --system-prompt so it's treated as a real system prompt, not injected
-        # as SYSTEM:\n...\n\n text (which Claude detects as prompt injection).
+        # Build the prompt string from the message list.
+        # - System messages: extracted separately for Claude (--system-prompt),
+        #   or prepended as context for other CLIs.
+        # - Conversation turns: formatted as Human/Assistant to make the history
+        #   legible to the underlying LLM without ambiguity about message roles.
+        # - The last user message is separated by "---" so the CLI can clearly
+        #   distinguish history from the current request.
         claude_system_prompt = ""
-        full_prompt = ""
-        for msg in messages:
+        history_parts: list[str] = []
+        current_user_content = ""
+
+        for i, msg in enumerate(messages):
             role = msg.get("role", "")
             content = msg.get("content", "")
-            if cli_name == CLI.CLAUDE and role == Role.SYSTEM:
-                claude_system_prompt = content
+            is_last = (i == len(messages) - 1)
+
+            if role == Role.SYSTEM:
+                if cli_name == CLI.CLAUDE:
+                    claude_system_prompt = content
+                else:
+                    history_parts.append(f"<system>\n{content}\n</system>\n\n")
                 continue
-            full_prompt += f"{role.upper()}:\n{content}\n\n"
+
+            if is_last and role == Role.USER:
+                current_user_content = content
+            else:
+                label = "Human" if role == Role.USER else "Assistant"
+                history_parts.append(f"{label}: {content}\n\n")
+
+        if history_parts:
+            full_prompt = "".join(history_parts) + "---\n\nHuman: " + current_user_content
+        else:
+            full_prompt = current_user_content
 
         model_name = model.split("/")[-1]
 
-        if cli_name == CLI.GEMINI:
-            # Prepend @path refs so gemini resolves them natively (multimodal).
+        if cli_name == CLI.AGY:
+            # Prepend @path refs so agy resolves them natively (multimodal).
             if media_files:
                 refs = " ".join(f"@{p.absolute()}" for p in media_files)
                 full_prompt = refs + "\n\n" + full_prompt
-            cmd = [cli_path, "--prompt", full_prompt, "--model", model_name]
-            # Plain text mode buffers the whole response and prints it at
-            # once at the end; stream-json emits incremental text deltas.
-            if stream:
-                cmd += ["--output-format", "stream-json"]
+            # agy 1.x: use --print (alias --prompt) for non-interactive mode.
+            # No --output-format flag exists in agy 1.x; plain text is default.
+            cmd = [cli_path, "--print", full_prompt, "--model", model_name]
         elif cli_name == CLI.CODEX:
-            # codex exec uses the account's default model; explicit model
-            # aliases (e.g. "default") are not valid -m values.
+            # codex exec: model defaults to account default; don't pass -m with
+            # "default" since it's not a valid -m value.
             cmd = [cli_path, "exec", full_prompt]
         elif cli_name == CLI.CLAUDE:
             cmd = [cli_path, "-p", full_prompt, "--model", model_name]
@@ -325,13 +395,15 @@ class Gateway:
         else:
             cmd = [cli_path, full_prompt]
 
-        # Insert mode flags (yolo/plan). codex's (-s/-a) are global flags and
-        # must precede the "exec" subcommand; the others are top-level flags.
-        insert_at = 1
+        # Insert mode flags.
+        # For codex, mode flags (-s / --dangerously-bypass-*) are exec-subcommand
+        # flags and must come AFTER the "exec" argument (position 2).
+        # All other CLIs take top-level flags (position 1).
+        insert_at = 2 if cli_name == CLI.CODEX else 1
         mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO]).get(cli_name, [])
         cmd[insert_at:insert_at] = mode_flags
 
-        # Wire up MCP servers declared in .agentrc.toml, if any.
+        # Wire up MCP servers.
         if self.mcp_servers:
             if cli_name == CLI.CLAUDE and self.claude_mcp_config_path:
                 cmd += ["--mcp-config", str(self.claude_mcp_config_path)]
@@ -340,18 +412,18 @@ class Gateway:
                 for name, server in self.mcp_servers.items():
                     for key, value in server.items():
                         mcp_flags += ["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"]
-                # -c overrides must precede the prompt positional argument
-                # but after "exec" (at index 1 + len(mode_flags)).
-                flag_pos = insert_at + len(mode_flags) + 1
+                # Insert after mode flags, before the prompt positional arg.
+                flag_pos = insert_at + len(mode_flags)
                 cmd[flag_pos:flag_pos] = mcp_flags
-            # gemini reads mcpServers from .gemini/settings.json automatically.
+            # agy reads mcpServers from .agy/settings.json automatically.
 
         # Prepare a clean environment for the subprocess
         env = os.environ.copy()
         if "GOOGLE_CLOUD_PROJECT" in env:
             del env["GOOGLE_CLOUD_PROJECT"]
-        if cli_name == CLI.GEMINI:
+        if cli_name == CLI.AGY:
             # Bypass folder trust prompt in headless mode (replaces --skip-trust flag).
+            env["AGY_CLI_TRUST_WORKSPACE"] = "true"
             env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 
         return cmd, env
@@ -382,16 +454,43 @@ class Gateway:
         remaining = self._rate_limited_until.get(cli_name, 0) - time.time()
         return int(remaining) + 1 if remaining > 0 else None
 
-    @staticmethod
-    def _is_noise_line(line: str) -> bool:
-        """Diagnostic lines some CLIs (e.g. gemini) print to stdout."""
-        return line.startswith("[ExtensionManager]") or "MCP issues detected" in line
+    _NOISE_PREFIXES = (
+        "[ExtensionManager]", "[MCP]", "[mcp]", "Connecting to MCP",
+        "Connected to MCP", "MCP server", "MCP issues", "Starting MCP",
+        # mcp-remote (OAuth proxy for remote MCP servers like growwmcp)
+        "Proxy server listening", "Starting MCP proxy", "mcp-remote",
+        "Loaded tokens", "Token stored", "Opening browser",
+        "Authorization URL", "Waiting for OAuth", "OAuth callback",
+        # agy startup noise
+        "[ExtensionManager]", "Loading extension", "Extension loaded",
+    )
+    _NOISE_SUBSTRINGS = (
+        "MCP issues detected", "mcp-remote", "growwmcp", "chrome-devtools",
+        "mcpServer", "mcp_server",
+    )
+
+    @classmethod
+    def _is_noise_line(cls, line: str) -> bool:
+        """Filter diagnostic / MCP connection chatter CLIs print to stdout."""
+        for pfx in cls._NOISE_PREFIXES:
+            if line.startswith(pfx):
+                return True
+        for sub in cls._NOISE_SUBSTRINGS:
+            if sub in line:
+                return True
+        return False
+
+    # How long to wait for a CLI before treating it as hung (e.g. waiting for
+    # an OAuth prompt it will never get in headless mode). 5 minutes is generous
+    # for long tasks; a CLI that needs auth will typically hang immediately.
+    _CLI_TIMEOUT = 300  # seconds
 
     def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo", media_files: List[Path] = []) -> str:
-        """Executes a local CLI (gemini, codex, claude) and returns its full output."""
+        """Executes a local CLI (agy, codex, claude) and returns its full output."""
         cmd, env = self._build_cmd(cli_name, messages, model, mode, media_files=media_files)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                                    timeout=self._CLI_TIMEOUT)
 
             output = result.stdout.strip()
             err_output = result.stderr.strip()
@@ -406,6 +505,8 @@ class Gateway:
                 raise Exception(f"{cli_name} CLI returned no usable output. STDOUT: {output} STDERR: {err_output}")
             self._record_usage(cli_name, model, err_output, tier)
             return final_output
+        except subprocess.TimeoutExpired:
+            raise Exception(f"{cli_name} CLI timed out ({self._CLI_TIMEOUT}s) — likely waiting for auth. Run /login {cli_name}.")
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
@@ -415,40 +516,55 @@ class Gateway:
         already seen (new conversation, /resume, or /mode//model change)."""
         model_name = model.split("/")[-1]
         mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO])["claude"]
-        user_turns = [m for m in messages if m["role"] != Role.SYSTEM]
-        if not user_turns:
+        system_prompt = next((m["content"] for m in messages if m["role"] == Role.SYSTEM), "")
+        non_system = [m for m in messages if m["role"] != Role.SYSTEM]
+        if not non_system:
             raise Exception("claude CLI execution error: no user message to send")
 
-        # A continuation means the session has already seen all prior messages
-        # and just needs the new last user turn. We check the total non-system
-        # message count: if it equals what we last recorded + 1 new user turn
-        # and +1 assistant turn for each prior round (i.e. len == prev + 2 or
-        # len == 1 for the very first turn), it's a continuation.
-        # Simpler: _claude_history_len stores len(user_turns) after each send,
-        # so a continuation is exactly len(user_turns) == _claude_history_len + 1.
+        # Track completed turn-pairs (user+assistant) so we know whether to
+        # continue the existing session or start a new one.
+        # messages[-1] is always the new user turn; everything before it is
+        # prior history: an even number of (user, assistant) pairs.
+        complete_pairs = (len(non_system) - 1) // 2
+
         is_continuation = (
             self._claude_session is not None
             and self._claude_session.alive()
-            and self._claude_session.matches(model_name, mode_flags)
-            and len(user_turns) == self._claude_history_len + 1
+            and self._claude_session.matches(model_name, mode_flags, system_prompt)
+            and complete_pairs == self._claude_history_len
         )
+
+        current_prompt = non_system[-1]["content"]
 
         if not is_continuation:
             if self._claude_session is not None:
                 self._claude_session.close()
-            system_prompt = next((m["content"] for m in messages if m["role"] == Role.SYSTEM), "")
             self._claude_session = ClaudeSession(
                 model_name, mode_flags, system_prompt=system_prompt,
                 mcp_config_path=self.claude_mcp_config_path,
             )
             self._claude_history_len = 0
+            # Replay prior turns as context so Claude isn't starting blind after
+            # a compact, /resume, or system-prompt change.
+            if complete_pairs > 0:
+                prior = non_system[:-1]
+                history_text = "\n\n".join(
+                    f"{'Human' if m['role'] == Role.USER else 'Assistant'}: {m['content']}"
+                    for m in prior
+                )
+                current_prompt = (
+                    f"[Conversation history for context — do not repeat or summarize it, "
+                    f"just use it to answer the request below]\n\n"
+                    f"{history_text}\n\n"
+                    f"---\n\n{current_prompt}"
+                )
 
         tokens = None
         yielded_any = False
         try:
             from src.routing.claude_session import THINKING_START, THINKING_END
             sentinels = {THINKING_START, THINKING_END}
-            for chunk, line_tokens in self._claude_session.send(user_turns[-1]["content"]):
+            for chunk, line_tokens in self._claude_session.send(current_prompt):
                 if line_tokens is not None:
                     tokens = line_tokens
                 if chunk:
@@ -461,7 +577,7 @@ class Gateway:
             self._claude_history_len = 0
             raise Exception(f"claude CLI execution error: {e}")
 
-        self._claude_history_len = len(user_turns)
+        self._claude_history_len = complete_pairs + 1
         if not yielded_any:
             raise Exception("claude CLI returned no usable output.")
         self._record_usage(CLI.CLAUDE, model, "", tier, tokens=tokens)
@@ -484,16 +600,19 @@ class Gateway:
         model_name = model_override or self.cli_default_models[cli_override][tier]
         return cli_override, f"{cli_override}/{model_name}"
 
-    def close(self) -> None:
-        """Releases any persistent CLI sessions. Call on app exit."""
+    def close(self, stop_mcp_server: bool = False) -> None:
+        """Releases persistent CLI sessions. Call on app exit.
+        Pass stop_mcp_server=True from the main app instance only."""
         if self._claude_session is not None:
             self._claude_session.close()
             self._claude_session = None
+        if stop_mcp_server:
+            self.close_shared_mcp_server()
 
     def _run_cli_stream(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo", media_files: List[Path] = []) -> Generator[str, None, None]:
         """Executes a local CLI and yields its output incrementally.
 
-        claude/gemini use stream-json so chunks are real token deltas as the
+        claude/agy use stream-json so chunks are real token deltas as the
         model generates them; codex has no equivalent and yields its output
         (still effectively one chunk near the end) line by line.
         """
@@ -501,9 +620,11 @@ class Gateway:
             yield from self._run_claude_persistent_stream(messages, model, tier, mode)
             return
 
-        stream_json = cli_name == CLI.GEMINI
-        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=stream_json, media_files=media_files)
-        line_parser = self._parse_gemini_stream_line if cli_name == CLI.GEMINI else None
+        # agy 1.x outputs plain text; the stream=True flag no longer switches
+        # to stream-json (that flag was removed in agy 1.x).
+        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=False, media_files=media_files)
+        # Both agy and codex output plain text line-by-line via PTY.
+        line_parser = self._parse_agy_stream_line if cli_name == CLI.AGY else None
 
         try:
             import pty
@@ -623,8 +744,8 @@ class Gateway:
     @staticmethod
     def _cli_for_model(model: str) -> CLI:
         """Maps a "<provider>/<model>" entry to its CLI binary name."""
-        if model.startswith("gemini/"):
-            return CLI.GEMINI
+        if model.startswith("agy/"):
+            return CLI.AGY
         elif model.startswith("github/") or model.startswith("codex/"):
             return CLI.CODEX
         elif model.startswith("anthropic/"):

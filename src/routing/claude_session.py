@@ -37,6 +37,7 @@ class ClaudeSession:
 
         self.model = model
         self.mode_flags = mode_flags
+        self.system_prompt = system_prompt
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
@@ -50,8 +51,9 @@ class ClaudeSession:
             self._lines.put(line)
         self._lines.put(None)
 
-    def matches(self, model: str, mode_flags: List[str]) -> bool:
-        return self.model == model and self.mode_flags == mode_flags
+    def matches(self, model: str, mode_flags: List[str], system_prompt: str = "") -> bool:
+        return (self.model == model and self.mode_flags == mode_flags
+                and self.system_prompt == system_prompt)
 
     def alive(self) -> bool:
         return self._proc.poll() is None

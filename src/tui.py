@@ -1,6 +1,8 @@
 import re
 import shlex
+import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -13,7 +15,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.suggester import Suggester
 from textual.widget import Widget
-from textual.widgets import Footer, Input, Markdown, Static
+from textual.widgets import Footer, TextArea, Markdown, Static
 
 from src.routing.claude_session import THINKING_END, THINKING_START
 from src.routing.constants import CLI, Mode, Role, Tier
@@ -30,12 +32,37 @@ from src.tools.websearch import fetch_url, format_results, search
 SKILLS_DIR = Path(".codehydra/skills")
 MEMORY_FILE = Path(".codehydra/memory.md")
 
+# Human-readable display names for CLI binaries.
+_CLI_DISPLAY = {
+    CLI.CLAUDE: "claude",
+    CLI.AGY:    "agy",
+    CLI.CODEX:  "codex",
+    CLI.OLLAMA: "ollama",
+}
+
+# Accept friendly aliases for /login (e.g. /login gemini → /login agy).
+_LOGIN_ALIASES: dict[str, str] = {
+    "gemini": CLI.AGY,
+    "google": CLI.AGY,
+}
+
+# Regex to detect meta-questions about conversation history so we can
+# answer them locally rather than routing to a CLI that only sees its
+# own subprocess invocation and has no awareness of prior turns.
+_HISTORY_META_RE = re.compile(
+    r"\bwhat\s+(was|is|were)\s+(my|the)\s+(last|previous|prior)\s+(message|prompt|question|input)\b|"
+    r"\bwhat\s+did\s+i\s+(just\s+)?(say|ask|type|write)\b|"
+    r"\b(repeat|show)\s+(my\s+)?(last|previous)\s+(message|prompt)\b|"
+    r"\bwhat\s+was\s+my\s+(last|previous)\b",
+    re.IGNORECASE,
+)
+
 SLASH_COMMANDS = [
     f"/effort {Tier.LOW}", f"/effort {Tier.MEDIUM}", f"/effort {Tier.HIGH}",
-    f"/cli auto", f"/cli {CLI.CLAUDE}", f"/cli {CLI.GEMINI}", f"/cli {CLI.CODEX}", f"/cli {CLI.OLLAMA}",
+    f"/cli auto", f"/cli {CLI.CLAUDE}", f"/cli {CLI.AGY}", f"/cli {CLI.CODEX}", f"/cli {CLI.OLLAMA}",
     "/model auto",
     f"/mode {Mode.PLAN}", f"/mode {Mode.YOLO}",
-    f"/login {CLI.CLAUDE}", f"/login {CLI.GEMINI}", f"/login {CLI.CODEX}", f"/login {CLI.OLLAMA}",
+    f"/login {CLI.CLAUDE}", f"/login {CLI.AGY}", f"/login {CLI.CODEX}", f"/login {CLI.OLLAMA}",
     "/parallel",
     "/compare",
     "/skills",
@@ -43,6 +70,7 @@ SLASH_COMMANDS = [
     "/cost", "/clear", "/compact", "/help", "/exit",
     "/memory", "/remember", "/forget",
     "/search",
+    "/doctor",
 ]
 
 HELP_TEXT = """\
@@ -52,12 +80,13 @@ HELP_TEXT = """\
 | Command | Description |
 |---|---|
 | `/effort low\\|medium\\|high` | Set effort tier — affects model quality |
-| `/cli auto\\|claude\\|gemini\\|codex\\|ollama` | Pin backend CLI for this session |
+| `/cli auto\\|claude\\|agy\\|codex\\|ollama` | Pin backend CLI for this session |
 | `/model <name\\|auto>` | Pin exact model name |
 | `/mode plan\\|yolo` | `plan`=read-only, `yolo`=auto-approve edits |
 
 **Auth**
 | `/login <cli>` | Launch auth flow, or show setup info for ollama |
+| `/doctor` | Check CLI availability, auth, MCP server, and project health |
 
 **Context**
 | `/compact` | Summarise old history, keep 2 recent turns |
@@ -69,8 +98,8 @@ HELP_TEXT = """\
 **Inline expansions (in any prompt)**
 | `@path/to/file` | Inject file content |
 | `@https://url` | Fetch URL and inject content |
-| `@image.png` | Attach image (gemini: native multimodal; ollama: vision API) |
-| `@doc.pdf` | Attach PDF (gemini: native; others: pdftotext) |
+| `@image.png` | Attach image (agy: native multimodal; ollama: vision API) |
+| `@doc.pdf` | Attach PDF (agy: native; others: pdftotext) |
 
 **Skills**
 | `/skills` | List skills in `.codehydra/skills/` |
@@ -86,7 +115,11 @@ HELP_TEXT = """\
 | `/cost` | Per-turn CLI/model/tier and token usage |
 | `/clear` | Reset conversation history |
 
-Press **Ctrl+C** to quit.
+**Input**
+| `Ctrl+Enter` | Insert newline (multi-line prompt) |
+| `Ctrl+E` | Open prompt in `$EDITOR` (Vim/Nano/VSCode etc.) |
+| `↑` / `↓` | Navigate prompt history |
+| `Ctrl+C` | Cancel active request / clear input / quit |
 """
 
 
@@ -110,6 +143,47 @@ class SlashSuggester(Suggester):
         return None
 
 
+class PromptTextArea(TextArea):
+    """Prompt input where Enter submits and Ctrl+Enter adds a newline."""
+
+    def on_key(self, event) -> None:
+        if event.key == "up":
+            row, _ = self.cursor_location
+            if row == 0:
+                event.prevent_default()
+                event.stop()
+                self.app.action_history_up()
+        elif event.key == "down":
+            row, _ = self.cursor_location
+            last_row = self.text.count("\n")
+            if row == last_row:
+                event.prevent_default()
+                event.stop()
+                self.app.action_history_down()
+        elif event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            self.app.action_submit_input()
+        elif event.key == "ctrl+enter":
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+        elif event.key == "ctrl+e":
+            event.prevent_default()
+            event.stop()
+            self.app._open_in_editor()
+        elif event.key == "ctrl+c":
+            event.prevent_default()
+            event.stop()
+            if self.app._request_active and not self.app._cancel_event.is_set():
+                # Active request, not already cancelling: cancel it.
+                self.app._cancel_request()
+            elif self.text:
+                self.text = ""
+            else:
+                self.app.exit()
+
+
 class HydraApp(App):
     """Claude Code-style TUI: scrollable history with a pinned input box."""
 
@@ -124,17 +198,41 @@ class HydraApp(App):
         color: $text-muted;
         padding: 0 1;
     }
-    .thinking {
+    #input-area {
+        height: auto;
+        max-height: 8;
+        padding: 0 1;
+        border: solid $accent;
+    }
+    .user-msg {
+        color: $accent;
+        padding: 0 1;
+        margin-top: 1;
+    }
+    .thinking-active {
         color: $text-muted;
         text-style: italic;
+        padding: 0 2;
+        border-left: solid $accent;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    .thinking-done {
+        color: $text-muted;
+        padding: 0 2;
+        margin-bottom: 0;
+    }
+    .response-turn {
         padding: 0 1;
+        margin-top: 0;
+        margin-bottom: 1;
     }
     Markdown {
         padding: 0 1;
     }
     """
 
-    BINDINGS = [("ctrl+c", "quit", "Quit")]
+    BINDINGS = []
 
     def __init__(self):
         super().__init__()
@@ -153,51 +251,86 @@ class HydraApp(App):
         self.mode = Mode.YOLO
         self.usage_log = []
         self.session_id = self.sessions.new_session_id()
+        self._prompt_history = []
+        self._history_index = -1
+        # Tracks whether a request worker is currently running.
+        self._request_active = False
+        self._cancel_event = threading.Event()
 
     def on_unmount(self) -> None:
         self._save_session()
-        self.gateway.close()
+        self.gateway.close(stop_mcp_server=True)
+
+    def _cancel_request(self) -> None:
+        """Signal the active request worker to abort on the next chunk."""
+        self._cancel_event.set()
+        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="history")
         yield Static(id="status")
-        yield Input(placeholder="Type a message or /command...", suggester=SlashSuggester())
+        text_area = PromptTextArea(id="input-area", language="markdown")
+        text_area.text = ""
+        yield text_area
         yield Footer()
 
     def on_mount(self) -> None:
         self._history_scroll = self.query_one("#history", VerticalScroll)
         auth_status = self.gateway.cli_auth_status
         ready = [cli for cli, ok in auth_status.items() if ok]
-        sub_info = (
-            f"Ready CLIs: {', '.join(ready)}"
-            if ready else "No CLIs are logged in. Run /login <cli> to authenticate."
-        )
         unauthenticated = [cli for cli, ok in auth_status.items() if not ok and cli in Gateway.LOGIN_COMMANDS]
-        lines = [Text("CodeHydra - BYOS Agent Active", style="bold green"), Text(sub_info)]
+
+        ready_names = [_CLI_DISPLAY.get(c, c) for c in ready]
+        header = Text("CodeHydra", style="bold green")
+        if ready_names:
+            sub = Text(f"  {', '.join(ready_names)} ready", style="dim")
+            self._add_message(Group(header, sub))
+        else:
+            self._add_message(header)
+
         if unauthenticated:
-            lines.append(Text(
-                f"Not logged in: {', '.join(unauthenticated)} - run /login <cli> to authenticate",
-                style="yellow",
+            lines = ["**Not authenticated** — run the command to log in:\n"]
+            for cli in unauthenticated:
+                display = _CLI_DISPLAY.get(cli, cli)
+                lines.append(f"- **{display}**: `/login {display}`\n")
+            self._add_message(Markdown("".join(lines)))
+        elif not ready:
+            self._add_message(Markdown(
+                "No CLIs active. Run `/login claude`, `/login agy`, or `/login codex`."
             ))
-        self._add_message(Group(*lines))
+
         self._update_status()
-        self.query_one(Input).focus()
+        self.query_one("#input-area", TextArea).focus()
 
     # -- helpers -----------------------------------------------------
 
     def _update_status(self) -> None:
-        cli = self.cli_override or "auto"
-        model = self.model_override or "auto"
-        tier = self.effort_tier or "auto"
+        parts: list[str] = []
+        if self._request_active:
+            parts.append("⏳ thinking… (Ctrl+C to cancel)")
+        if self.cli_override:
+            parts.append(f"cli:{_CLI_DISPLAY.get(self.cli_override, self.cli_override)}")
+        if self.model_override:
+            parts.append(f"model:{self.model_override}")
+        if self.effort_tier:
+            parts.append(f"effort:{self.effort_tier}")
+        if self.mode != Mode.YOLO:
+            parts.append(f"mode:{self.mode}")
+        if self.usage_log and not self.cli_override:
+            last = self.usage_log[-1]
+            display_cli = _CLI_DISPLAY.get(last["cli"], last["cli"])
+            short_model = last["model"].split("/")[-1]
+            parts.append(f"via {display_cli}/{short_model}")
         rl_parts = []
         for name in CLI:
             secs = self.gateway.rate_limit_resets_in(name)
             if secs is not None:
-                rl_parts.append(f"{name}⏳{secs}s")
-        rl_str = f"  rate-limited: {' '.join(rl_parts)}" if rl_parts else ""
-        self.query_one("#status", Static).update(
-            f"cli={cli}  model={model}  effort={tier}  mode={self.mode}  session={self.session_id}{rl_str}"
-        )
+                rl_parts.append(f"{_CLI_DISPLAY.get(name, name)}⏳{secs}s")
+        if rl_parts:
+            parts.append(f"rate-limited: {' '.join(rl_parts)}")
+        parts.append(f"session:{self.session_id}")
+        status = "  ".join(parts) if parts else ""
+        self.query_one("#status", Static).update(status)
 
     def _build_system_msg_base(self) -> str:
         context = self.scanner.get_system_prompt_context()
@@ -230,26 +363,30 @@ class HydraApp(App):
         return widget
 
     def _add_response_turn(self):
-        """Mounts (thinking_static, markdown_widget) for a streaming response.
-        Both are returned so the worker thread can update them incrementally.
-        Markdown widget supports mouse selection; thinking stays as Static (dim).
-        """
+        """Mount a Markdown widget for streaming response. Returns it.
+        Thinking widget is NOT mounted here; it's lazily inserted above this
+        widget only if the model actually produces thinking output."""
         history = self._history_scroll
-        thinking = Static("", classes="thinking")
-        md = Markdown("")
-        history.mount(thinking)
+        md = Markdown("", classes="response-turn")
         history.mount(md)
         history.scroll_end(animate=False)
-        return thinking, md
+        return md
+
+    def _mount_thinking_widget(self, before: "Widget") -> "Static":
+        """Lazily insert a thinking indicator above `before`. Called from worker."""
+        w = Static("⟳ Thinking…", classes="thinking-active")
+        self._history_scroll.mount(w, before=before)
+        self._history_scroll.scroll_end(animate=False)
+        return w
 
     def _render_history(self) -> None:
         history = self._history_scroll
         history.remove_children()
         for msg in self.history:
-            if msg["role"] == "user":
-                history.mount(Static(Text(f"> {msg['content']}", style="dim")))
-            elif msg["role"] == "assistant":
-                history.mount(Markdown(msg["content"]))
+            if msg["role"] == Role.USER:
+                history.mount(Static(f"  {msg['content']}", classes="user-msg"))
+            elif msg["role"] == Role.ASSISTANT:
+                history.mount(Markdown(msg["content"], classes="response-turn"))
         history.scroll_end(animate=False)
 
     def _save_session(self) -> None:
@@ -295,6 +432,26 @@ class HydraApp(App):
 
         self.gateway.refresh_auth()
         self._add_message(Text(f"Refreshed credentials for '{cli_name}'.", style="green"))
+
+    # -- history meta-answers ------------------------------------------
+
+    def _try_answer_locally(self, text: str) -> bool:
+        """Answer meta-questions about conversation history from local state.
+        Returns True if answered locally (caller should skip CLI routing).
+        Adds the exchange to history so future turns retain the context."""
+        if not _HISTORY_META_RE.search(text):
+            return False
+        user_turns = [m for m in self.history if m["role"] == Role.USER]
+        if not user_turns:
+            answer = "No previous messages in this session."
+        else:
+            last = user_turns[-1]["content"]
+            answer = f"Your last message:\n\n```\n{last}\n```"
+        self._add_message(Markdown(answer))
+        # Record in history so subsequent turns have the context.
+        self.history.append({"role": Role.USER, "content": text})
+        self.history.append({"role": Role.ASSISTANT, "content": answer})
+        return True
 
     # -- input handling ------------------------------------------------
 
@@ -347,9 +504,11 @@ class HydraApp(App):
         expanded = self._AT_FILE_RE.sub(replace, text)
         return expanded, injected, media_files
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        self.query_one(Input).value = ""
+    def action_submit_input(self) -> None:
+        """Submit the current input."""
+        text_area = self.query_one("#input-area", TextArea)
+        text = text_area.text.strip()
+        text_area.text = ""
         if not text:
             return
 
@@ -361,10 +520,19 @@ class HydraApp(App):
             self._handle_command(text)
             return
 
+        # Answer meta-questions (e.g. "what was my last message") from local
+        # history without routing to a CLI that has no awareness of prior turns.
+        if self._try_answer_locally(text):
+            self._prompt_history.append(text)
+            self._history_index = len(self._prompt_history)
+            return
+
         expanded, injected, media_files = self._expand_file_refs(text)
-        self._add_message(Text(f"> {text}", style="dim"))
+        self._add_message(Static(f"  {text}", classes="user-msg"))
         if injected:
             self._add_message(Text(f"  @{' @'.join(injected)}", style="dim cyan"))
+        self._prompt_history.append(text)
+        self._history_index = len(self._prompt_history)
         self._run_prompt(expanded, media_files)
 
     def _handle_command(self, user_input: str) -> None:
@@ -379,11 +547,12 @@ class HydraApp(App):
             self._run_compact()
         elif cmd.startswith("login"):
             parts = cmd.split(" ")
-            valid_logins = list(Gateway.LOGIN_COMMANDS) + [CLI.OLLAMA]
+            valid_display = [_CLI_DISPLAY.get(c, c) for c in list(Gateway.LOGIN_COMMANDS) + [CLI.OLLAMA]]
             if len(parts) != 2:
-                self._add_message(Text(f"Usage: /login <{'|'.join(valid_logins)}>", style="red"))
+                self._add_message(Text(f"Usage: /login <{'|'.join(valid_display)}>", style="red"))
             else:
-                self._login(parts[1])
+                cli_name = _LOGIN_ALIASES.get(parts[1], parts[1])
+                self._login(cli_name)
         elif cmd.startswith("effort "):
             tier = cmd.split(" ")[1]
             if tier in ("low", "medium", "high"):
@@ -568,13 +737,111 @@ class HydraApp(App):
                 ))
         elif cmd == "help":
             self._add_message(Markdown(HELP_TEXT))
+        elif cmd == "doctor":
+            self._run_doctor()
         else:
             self._add_message(Text(f"Unknown command: {cmd}", style="red"))
 
-    # -- workers ---------------------------------------------------------
+    def action_history_up(self) -> None:
+        if self._prompt_history:
+            if self._history_index > 0:
+                self._history_index -= 1
+            self.query_one("#input-area", TextArea).text = self._prompt_history[self._history_index]
+
+    def action_history_down(self) -> None:
+        if self._prompt_history:
+            if self._history_index < len(self._prompt_history) - 1:
+                self._history_index += 1
+                self.query_one("#input-area", TextArea).text = self._prompt_history[self._history_index]
+            elif self._history_index == len(self._prompt_history) - 1:
+                self._history_index = len(self._prompt_history)
+                self.query_one("#input-area", TextArea).text = ""
+
+    def _run_doctor(self) -> None:
+        """Show health status for all CLIs, MCP server, and project structure."""
+        rows = []
+        auth = self.gateway.cli_auth_status
+
+        cli_bin_map = {
+            CLI.CLAUDE: "claude",
+            CLI.AGY:    "agy",
+            CLI.CODEX:  "codex",
+            CLI.OLLAMA: "ollama",
+        }
+        for cli, bin_name in cli_bin_map.items():
+            on_path = shutil.which(bin_name) is not None
+            authenticated = auth.get(cli, False)
+            path_icon = "✓" if on_path else "✗"
+            auth_icon = "✓" if authenticated else ("–" if not on_path else "✗")
+            rows.append((
+                _CLI_DISPLAY.get(cli, cli),
+                Text(f"{path_icon} on PATH", style="green" if on_path else "red"),
+                Text(f"{auth_icon} auth", style="green" if authenticated else ("dim" if not on_path else "red")),
+            ))
+
+        table = Table(title="CLI Health", show_lines=False)
+        table.add_column("CLI")
+        table.add_column("Binary")
+        table.add_column("Auth")
+        for name, path_txt, auth_txt in rows:
+            table.add_row(name, path_txt, auth_txt)
+
+        # MCP server
+        from src.routing.gateway import _SHARED_MCP
+        mcp_port = _SHARED_MCP.get("port")
+        mcp_line = Text(
+            f"✓ MCP server running on port {mcp_port}" if mcp_port else "✗ MCP server not started",
+            style="green" if mcp_port else "yellow",
+        )
+
+        # Project files
+        mem_line = Text(
+            f"✓ Memory: {MEMORY_FILE}" if MEMORY_FILE.exists() else "– No memory file (.codehydra/memory.md)",
+            style="green" if MEMORY_FILE.exists() else "dim",
+        )
+        skills_count = len(_skill_names())
+        skill_line = Text(
+            f"✓ Skills: {skills_count} in {SKILLS_DIR}" if skills_count else f"– No skills ({SKILLS_DIR})",
+            style="green" if skills_count else "dim",
+        )
+        session_line = Text(f"✓ Session: {self.session_id}", style="dim")
+
+        self._add_message(Group(table, Text(""), mcp_line, mem_line, skill_line, session_line))
+
+    def _open_in_editor(self) -> None:
+        """Open current prompt in $EDITOR (Ctrl+E). Suspends TUI, restores text after."""
+        import os as _os
+        import tempfile
+        editor = _os.environ.get("EDITOR") or _os.environ.get("VISUAL") or "vi"
+        area = self.query_one("#input-area", TextArea)
+        current = area.text
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
+                f.write(current)
+                tmp_path = Path(f.name)
+            with self.suspend():
+                subprocess.run([editor, str(tmp_path)], check=False)
+            area.text = tmp_path.read_text()
+            area.move_cursor_to_end()
+        except Exception as e:
+            self._add_message(Text(f"Editor error: {e}", style="red"))
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str, media_files: list[Path] | None = None) -> None:
+        self._cancel_event.clear()
+        self.call_from_thread(self._set_request_active, True)
+        try:
+            self._run_prompt_inner(prompt, media_files)
+        finally:
+            self.call_from_thread(self._set_request_active, False)
+
+    def _set_request_active(self, active: bool) -> None:
+        self._request_active = active
+        self._update_status()
+
+    def _run_prompt_inner(self, prompt: str, media_files: list[Path] | None = None) -> None:
         self.call_from_thread(self._refresh_system_msg)
         turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
@@ -586,11 +853,22 @@ class HydraApp(App):
                     self.call_from_thread(self._add_message, Text(f"↩ {msg}", style="dim yellow"))
             except Exception as e:
                 self.call_from_thread(self._add_message, Text(f"Auto-compact failed: {e}", style="red"))
+        # Throttle Markdown re-renders: only push UI update every 100ms to avoid
+        # re-parsing the full markdown tree on every streamed token.
+        _MD_INTERVAL = 0.1  # seconds
+        # Thinking indicator cycles through these frames at each 500-char milestone.
+        _THINK_FRAMES = ("⟳", "◐", "◓", "◑", "◒")
+
         while True:
-            thinking_w, md_w = self.call_from_thread(self._add_response_turn)
-            thinking = ""
+            if self._cancel_event.is_set():
+                return
+            md_w = self.call_from_thread(self._add_response_turn)
+            thinking_w = None
+            thinking_start = None
+            thinking_chars = 0
             response = ""
             in_thinking = False
+            last_md_push = 0.0
             try:
                 for chunk in self.gateway.request_stream(
                     prompt,
@@ -601,28 +879,52 @@ class HydraApp(App):
                     mode=self.mode,
                     media_files=media_files or [],
                 ):
+                    if self._cancel_event.is_set():
+                        if thinking_w is not None:
+                            self.call_from_thread(thinking_w.remove)
+                        self.call_from_thread(md_w.update, f"{response}\n\n*[cancelled]*")
+                        return
                     if chunk == THINKING_START:
                         in_thinking = True
+                        thinking_start = time.time()
+                        thinking_w = self.call_from_thread(self._mount_thinking_widget, md_w)
                         continue
                     if chunk == THINKING_END:
                         in_thinking = False
+                        if thinking_w is not None and thinking_start is not None:
+                            secs = int(time.time() - thinking_start)
+                            label = f"↓ Thought for {secs}s" if secs > 0 else "↓ Thought"
+                            self.call_from_thread(thinking_w.set_classes, "thinking-done")
+                            self.call_from_thread(thinking_w.update, label)
                         continue
                     if in_thinking:
-                        thinking += chunk
-                        self.call_from_thread(thinking_w.update, thinking)
+                        thinking_chars += len(chunk)
+                        # Animate thinking indicator every 500 chars of thought.
+                        if thinking_w is not None and thinking_chars % 500 < len(chunk):
+                            frame = _THINK_FRAMES[(thinking_chars // 500) % len(_THINK_FRAMES)]
+                            self.call_from_thread(thinking_w.update, f"{frame} Thinking… ({thinking_chars:,} chars)")
                     else:
                         response += chunk
-                        self.call_from_thread(md_w.update, response)
-                    self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+                        now = time.monotonic()
+                        if now - last_md_push >= _MD_INTERVAL:
+                            self.call_from_thread(md_w.update, response)
+                            self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+                            last_md_push = now
             except Exception as e:
-                self.call_from_thread(thinking_w.remove)
+                if thinking_w is not None:
+                    self.call_from_thread(thinking_w.remove)
                 self.call_from_thread(md_w.update, f"**Error:** {e}")
                 return
 
-            response = response.strip()
+            # Final flush — ensure last partial chunk is displayed.
+            if response:
+                self.call_from_thread(md_w.update, response)
+                self.call_from_thread(self._history_scroll.scroll_end, animate=False)
+
             usage = self.gateway.last_usage
             if usage:
-                tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]"
+                display_cli = _CLI_DISPLAY.get(usage["cli"], usage["cli"])
+                tag = f"[{display_cli}/{usage['model'].split('/')[-1]}]"
                 self.call_from_thread(self._add_message, Text(tag, style="dim"))
             self.call_from_thread(self._update_status)
 
@@ -667,7 +969,7 @@ class HydraApp(App):
         )
         auth = self.gateway.cli_auth_status
         best_cli = next(
-            (c for c in (CLI.CLAUDE, CLI.GEMINI, CLI.CODEX) if auth.get(c)),
+            (c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)),
             self.cli_override,
         )
         summary = self.gateway.request(
@@ -708,11 +1010,12 @@ class HydraApp(App):
             self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
             return
         self.call_from_thread(self._add_message, Markdown(formatted))
-        # Inject results as context so the next prompt can reference them.
-        self.history.append({
-            "role": "assistant",
-            "content": f"[Web search results for: {query}]\n{formatted}",
-        })
+        # Add as a user+assistant pair so the conversation structure stays valid.
+        # The "user" turn records what was searched; the "assistant" turn holds
+        # the results so the next prompt can reference them.
+        content = f"[Web search results for: {query}]\n{formatted}"
+        self.history.append({"role": Role.USER,      "content": f"/search {query}"})
+        self.history.append({"role": Role.ASSISTANT, "content": content})
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
@@ -732,7 +1035,7 @@ class HydraApp(App):
             )
             return result, gw.last_usage
 
-        with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+        with ThreadPoolExecutor(max_workers=max(1, len(prompts))) as executor:
             futures = {executor.submit(run_task, p): p for p in prompts}
             for future in as_completed(futures):
                 prompt = futures[future]
@@ -743,7 +1046,7 @@ class HydraApp(App):
                     continue
 
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
-                self.call_from_thread(self._add_message, Text(f"> {prompt[:60]}", style="dim"))
+                self.call_from_thread(self._add_message, Static(f"  {prompt[:60]}", classes="user-msg"))
                 self.call_from_thread(self._add_message, Markdown(result))
                 if tag:
                     self.call_from_thread(self._add_message, Text(tag, style="dim"))
@@ -776,7 +1079,7 @@ class HydraApp(App):
             return result, gw.last_usage, elapsed
 
         results_by_cli: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=len(cli_names)) as executor:
+        with ThreadPoolExecutor(max_workers=max(1, len(cli_names))) as executor:
             futures = {executor.submit(run_one, cli): cli for cli in cli_names}
             for future in as_completed(futures):
                 cli = futures[future]

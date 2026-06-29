@@ -1,5 +1,6 @@
 import os
 import ast
+import subprocess
 from pathlib import Path
 import pathspec
 from typing import List, Dict, Optional
@@ -71,10 +72,33 @@ class Scanner:
 
         return "\n".join(tree)
 
+    def get_git_context(self) -> str:
+        """Returns current git branch and working-tree status."""
+        try:
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, cwd=self.root_dir, timeout=3,
+            ).stdout.strip()
+            status = subprocess.run(
+                ["git", "status", "--short"],
+                capture_output=True, text=True, cwd=self.root_dir, timeout=3,
+            ).stdout.strip()
+            if not branch and not status:
+                return ""
+            parts = []
+            if branch:
+                parts.append(f"Branch: {branch}")
+            if status:
+                parts.append(f"Uncommitted changes:\n{status}")
+            return "\nGIT:\n" + "\n".join(parts) + "\n"
+        except Exception:
+            return ""
+
     def get_system_prompt_context(self) -> str:
-        """Returns the structural layout to be injected into the system prompt."""
+        """Returns workspace structure + git state injected into the system prompt."""
         tree_map = self.scan()
-        return f"\nCURRENT WORKSPACE STRUCTURE:\n```text\n{tree_map}\n```\n"
+        git = self.get_git_context()
+        return f"\nCURRENT WORKSPACE STRUCTURE:\n```text\n{tree_map}\n```\n{git}"
 
 if __name__ == "__main__":
     scanner = Scanner()

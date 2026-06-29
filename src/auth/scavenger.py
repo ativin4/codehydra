@@ -106,15 +106,15 @@ class Scavenger:
         except Exception:
             return {}
 
-    def get_gemini_cli_token(self) -> Optional[str]:
-        """Extracts token from Gemini CLI (~/.gemini/oauth_creds.json)."""
-        # Gemini CLI uses this path for its session tokens
-        cred_path = self.home / ".gemini" / "oauth_creds.json"
+    def get_agy_cli_token(self) -> Optional[str]:
+        """Extracts token from Agy CLI (~/.agy/oauth_creds.json)."""
+        # Agy CLI uses this path for its session tokens
+        cred_path = self.home / ".agy" / "oauth_creds.json"
         if cred_path.exists():
             try:
                 with open(cred_path, "r") as f:
                     data = json.load(f)
-                    # Gemini CLI usually stores the access token directly
+                    # Agy CLI usually stores the access token directly
                     return data.get("access_token") or data.get("token")
             except Exception:
                 pass
@@ -126,16 +126,16 @@ class Scavenger:
         if self.get_claude_token(): providers.append("anthropic")
         if self.get_copilot_token(): providers.append("github")
         if self.get_google_headers(): providers.append("google")
-        if self.get_gemini_cli_token(): providers.append("gemini_cli")
+        if self.get_agy_cli_token(): providers.append("agy_cli")
         return providers
 
     def get_all_headers(self) -> Dict[str, str]:
         """Aggregates all found credentials into a header dictionary."""
         headers = {}
         
-        gemini_token = self.get_gemini_cli_token()
-        if gemini_token:
-            headers["authorization"] = f"Bearer {gemini_token}"
+        agy_token = self.get_agy_cli_token()
+        if agy_token:
+            headers["authorization"] = f"Bearer {agy_token}"
 
         claude_token = self.get_claude_token()
         if claude_token:
@@ -151,8 +151,8 @@ class Scavenger:
         return headers
 
     def get_cli_auth_status(self) -> Dict[str, bool]:
-        """Checks whether each underlying CLI (claude, gemini, codex) is logged in."""
-        status = {"claude": False, "gemini": False, "codex": False}
+        """Checks whether each underlying CLI (claude, agy, codex) is logged in."""
+        status = {"claude": False, "agy": False, "codex": False}
 
         if shutil.which("claude"):
             try:
@@ -174,8 +174,8 @@ class Scavenger:
             except Exception:
                 pass
 
-        if shutil.which("gemini"):
-            status["gemini"] = self.get_gemini_cli_token() is not None
+        if shutil.which("agy"):
+            status["agy"] = self.get_agy_cli_token() is not None
 
         return status
 

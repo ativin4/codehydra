@@ -1,4 +1,4 @@
-"""Built-in MCP server giving the active backend CLI (claude/gemini/codex)
+"""Built-in MCP server giving the active backend CLI (claude/agy/codex)
 extra CodeHydra-native tools: fanning sub-tasks out to parallel agents
 (mirroring Claude Code's Task tool) and running long-lived background
 processes (mirroring Claude Code's background Bash + Monitor).
@@ -21,7 +21,7 @@ from typing import List
 from mcp.server.fastmcp import FastMCP
 from src.routing.gateway import Gateway
 
-mcp = FastMCP("codehydra-tools")
+mcp = FastMCP("codehydra-tools", log_level="ERROR")
 
 BG_DIR = Path(".codehydra") / "bg"
 
@@ -29,7 +29,7 @@ BG_DIR = Path(".codehydra") / "bg"
 @mcp.tool()
 def dispatch_agents(tasks: List[str], tier: str = "medium") -> List[str]:
     """Run multiple independent tasks in parallel, each via its own CodeHydra-routed
-    coding agent (claude/gemini/codex, picked automatically).
+    coding agent (claude/agy/codex, picked automatically).
 
     Use this for independent sub-tasks that don't depend on each other's output
     (e.g. researching several files, writing several modules, running several
@@ -43,6 +43,8 @@ def dispatch_agents(tasks: List[str], tier: str = "medium") -> List[str]:
     Returns:
         One result string per task, in the same order as `tasks`.
     """
+    # Set before spawning threads (single write before any reads) — thread-safe.
+    # This process is a subprocess of HydraApp so the mutation is isolated.
     os.environ["CODEHYDRA_ENABLE_SUBAGENTS"] = "0"
 
     def run(task: str) -> str:
@@ -184,4 +186,14 @@ def stop_background_task(task_id: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    import argparse as _ap
+    _p = _ap.ArgumentParser(description="CodeHydra built-in MCP server")
+    _p.add_argument("--transport", default="stdio", choices=["stdio", "streamable-http"])
+    _p.add_argument("--port", type=int, default=8766)
+    _args = _p.parse_args()
+    if _args.transport == "streamable-http":
+        mcp.settings.port = _args.port
+        mcp.settings.log_level = "ERROR"
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run()

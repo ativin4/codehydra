@@ -48,7 +48,7 @@ def _make_tui_app(tmp_path):
 
         gw_inst = MagicMock()
         gw_inst.cli_auth_status = {
-            CLI.CLAUDE: True, CLI.GEMINI: False,
+            CLI.CLAUDE: True, CLI.AGY: False,
             CLI.CODEX: False, CLI.OLLAMA: False,
         }
         gw_inst.rate_limit_resets_in.return_value = None
@@ -56,7 +56,7 @@ def _make_tui_app(tmp_path):
         MockGW.return_value = gw_inst
         MockGW.LOGIN_COMMANDS = {CLI.CLAUDE: ["claude", "auth", "login"]}
         MockGW.CLI_DEFAULT_MODELS = {
-            CLI.CLAUDE: {}, CLI.GEMINI: {}, CLI.CODEX: {}, CLI.OLLAMA: {},
+            CLI.CLAUDE: {}, CLI.AGY: {}, CLI.CODEX: {}, CLI.OLLAMA: {},
         }
 
         scanner_inst = MagicMock()
@@ -206,7 +206,7 @@ class TestDoCompactPicksBestCLI:
 
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
         app.system_msg = "sys"
-        app.cli_override = CLI.GEMINI
+        app.cli_override = CLI.AGY
         app.mode = Mode.PLAN
         app.history = [{"role": Role.SYSTEM, "content": "sys"}] + [
             msg
@@ -228,31 +228,31 @@ class TestDoCompactPicksBestCLI:
         from src.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
-            {CLI.CLAUDE: True, CLI.GEMINI: True, CLI.CODEX: False},
+            {CLI.CLAUDE: True, CLI.AGY: True, CLI.CODEX: False},
         )
         import src.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
         assert used_clis and used_clis[0] == CLI.CLAUDE
 
-    def test_falls_back_to_gemini_when_claude_absent(self, tmp_path, monkeypatch):
+    def test_falls_back_to_agy_when_claude_absent(self, tmp_path, monkeypatch):
         from src.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
-            {CLI.CLAUDE: False, CLI.GEMINI: True, CLI.CODEX: False},
+            {CLI.CLAUDE: False, CLI.AGY: True, CLI.CODEX: False},
         )
         import src.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
-        assert used_clis and used_clis[0] == CLI.GEMINI
+        assert used_clis and used_clis[0] == CLI.AGY
 
     def test_falls_back_to_override_when_none_authenticated(self, tmp_path, monkeypatch):
         from src.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
-            {CLI.CLAUDE: False, CLI.GEMINI: False, CLI.CODEX: False},
+            {CLI.CLAUDE: False, CLI.AGY: False, CLI.CODEX: False},
         )
         import src.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
-        assert used_clis and used_clis[0] == CLI.GEMINI  # fallback to self.cli_override
+        assert used_clis and used_clis[0] == CLI.AGY  # fallback to self.cli_override
 
 
 class TestOllamaExcludedFromAuthWarning:
@@ -263,7 +263,7 @@ class TestOllamaExcludedFromAuthWarning:
         from src.routing.constants import CLI
         from src.routing.gateway import Gateway
 
-        auth = {CLI.CLAUDE: False, CLI.GEMINI: False, CLI.CODEX: False, CLI.OLLAMA: ollama_ok}
+        auth = {CLI.CLAUDE: False, CLI.AGY: False, CLI.CODEX: False, CLI.OLLAMA: ollama_ok}
         unauthenticated = [c for c, ok in auth.items() if not ok and c in Gateway.LOGIN_COMMANDS]
         assert CLI.OLLAMA not in unauthenticated
 
@@ -287,17 +287,17 @@ class TestCompareAppendsHistory:
         app.mode = Mode.YOLO
 
         gw = MagicMock()
-        gw.cli_auth_status = {CLI.CLAUDE: True, CLI.GEMINI: True}
+        gw.cli_auth_status = {CLI.CLAUDE: True, CLI.AGY: True}
         gw.request.side_effect = lambda *a, cli_override=None, **kw: f"answer from {cli_override}"
         gw.last_usage = {"cli": "claude", "model": "a/haiku", "tokens": 10, "tier": "low"}
         app.gateway = gw
         app._save_session = lambda: None
 
         prompt = "what is 2+2?"
-        cli_names = [CLI.CLAUDE, CLI.GEMINI]
+        cli_names = [CLI.CLAUDE, CLI.AGY]
 
         # Replay the _run_compare post-loop logic
-        results_by_cli = {CLI.CLAUDE: "4 (claude)", CLI.GEMINI: "4 (gemini)"}
+        results_by_cli = {CLI.CLAUDE: "4 (claude)", CLI.AGY: "4 (agy)"}
         if results_by_cli:
             combined = "\n\n---\n\n".join(
                 f"**{cli}:**\n{results_by_cli[cli]}"
@@ -311,7 +311,7 @@ class TestCompareAppendsHistory:
         assert app.history[1]["content"] == prompt
         assert "[Compare]" in app.history[2]["content"]
         assert "claude" in app.history[2]["content"]
-        assert "gemini" in app.history[2]["content"]
+        assert "agy" in app.history[2]["content"]
 
 
 # ============================================================
@@ -411,7 +411,7 @@ class TestTUIHeadless:
 
         app = _make_tui_app(tmp_cwd)
         app.gateway.cli_auth_status = {
-            CLI.CLAUDE: True, CLI.GEMINI: False,
+            CLI.CLAUDE: True, CLI.AGY: False,
             CLI.CODEX: False, CLI.OLLAMA: False,
         }
         async with app.run_test(headless=True, size=(120, 40)) as pilot:
@@ -434,6 +434,35 @@ class TestTUIHeadless:
         async with app.run_test(headless=True, size=(120, 40)) as pilot:
             await _type_command(pilot, "exit")
             # No crash = pass
+
+    async def test_enter_submits_and_ctrl_enter_adds_newline(self, tmp_cwd):
+        """Enter submits; Ctrl+Enter inserts a newline in the prompt."""
+        from src.routing.constants import Role
+        from textual.widgets import TextArea
+
+        app = _make_tui_app(tmp_cwd)
+        async with app.run_test(headless=True, size=(120, 40)) as pilot:
+            text_area = app.query_one("#input-area", TextArea)
+
+            for ch in "line one":
+                await pilot.press(ch)
+            await pilot.press("ctrl+enter")
+            for ch in "line two":
+                await pilot.press(ch)
+            await pilot.pause(0.1)
+
+            assert text_area.text == "line one\nline two"
+
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            user_msgs = [m for m in app.history if m["role"] == Role.USER]
+            assert len(user_msgs) > 0, "Expected user message in history"
+            last_user = user_msgs[-1]
+            assert "line one" in last_user["content"]
+            assert "line two" in last_user["content"]
+
+            assert text_area.text == ""
 
 
 # ============================================================

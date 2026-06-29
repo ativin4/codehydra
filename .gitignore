@@ -4,5 +4,6 @@ __pycache__/
 .agentrc.toml
 .codehydra/
 .gemini/
+.agy/
 node_modules/
 .DS_Store
