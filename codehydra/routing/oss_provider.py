@@ -3,9 +3,10 @@ import os
 import urllib.request
 from typing import Dict, Generator, List
 
-# Read once at import time. Set OLLAMA_HOST to point at a remote instance,
-# e.g. export OLLAMA_HOST=https://my-ollama.example.com
-_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+def _base_url() -> str:
+    # Read at call time so OLLAMA_HOST changes (e.g. /login ollama) take effect.
+    return os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 
 
 class OllamaProvider:
@@ -14,7 +15,7 @@ class OllamaProvider:
     @classmethod
     def is_available(cls) -> bool:
         try:
-            with urllib.request.urlopen(f"{_BASE_URL}/api/tags", timeout=1) as r:
+            with urllib.request.urlopen(f"{_base_url()}/api/tags", timeout=1) as r:
                 return r.status == 200
         except Exception:
             return False
@@ -22,7 +23,7 @@ class OllamaProvider:
     @classmethod
     def list_models(cls) -> List[str]:
         try:
-            with urllib.request.urlopen(f"{_BASE_URL}/api/tags", timeout=2) as r:
+            with urllib.request.urlopen(f"{_base_url()}/api/tags", timeout=2) as r:
                 return [m["name"] for m in json.loads(r.read()).get("models", [])]
         except Exception:
             return []
@@ -31,7 +32,7 @@ class OllamaProvider:
     def generate(cls, model: str, messages: List[Dict]) -> Generator[str, None, None]:
         body = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
         req = urllib.request.Request(
-            f"{_BASE_URL}/api/chat",
+            f"{_base_url()}/api/chat",
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
