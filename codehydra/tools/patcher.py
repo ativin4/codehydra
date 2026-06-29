@@ -1,7 +1,9 @@
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 class Patcher:
     def __init__(self):
@@ -25,7 +27,7 @@ class Patcher:
                 logging.warning("Rejected path outside workspace: %s", file_path)
                 continue
             if not path.exists():
-                print(f"File not found: {file_path}")
+                logging.warning("Patch target not found: %s", file_path)
                 continue
 
             with open(path, "r") as f:
@@ -33,33 +35,35 @@ class Patcher:
 
             if search in file_content:
                 new_content = file_content.replace(search, replace, 1)
-                with open(path, "w") as f:
-                    f.write(new_content)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                try:
+                    with open(tmp, "w") as f:
+                        f.write(new_content)
+                    os.replace(tmp, path)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
                 patched_files.append(file_path)
             else:
-                print(f"Search block not found in {file_path}")
+                logging.warning("Search block not found in %s", file_path)
 
         return list(set(patched_files))
 
 if __name__ == "__main__":
-    # Simple test
     test_file = Path("test_patch.txt")
     test_file.write_text("line 1\nline 2\nline 3")
-    
     patcher = Patcher()
-    llm_output = """
-    I will fix the file now.
-    <<<<<<< SEARCH
-    line 2
-    =======
-    line TWO (fixed)
-    >>>>>>> REPLACE
-    """
-    
-    if patcher.apply_patches(llm_output, "test_patch.txt"):
-        print("Patch applied successfully!")
-        print(f"New content:\n{test_file.read_text()}")
+    llm_output = (
+        "File: test_patch.txt\n"
+        "<<<<<<< SEARCH\n"
+        "line 2\n"
+        "=======\n"
+        "line TWO (fixed)\n"
+        ">>>>>>> REPLACE"
+    )
+    patched = patcher.apply_all_patches(llm_output)
+    if patched:
+        print(f"Patched: {patched}\n{test_file.read_text()}")
     else:
         print("Patch failed.")
-    
     test_file.unlink()

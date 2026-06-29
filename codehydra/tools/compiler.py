@@ -32,7 +32,8 @@ class Compiler:
                 shlex.split(cmd),
                 cwd=self.root_dir,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=300,
             )
             output = result.stdout + result.stderr
             return result.returncode, output

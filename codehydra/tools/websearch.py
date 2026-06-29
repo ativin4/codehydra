@@ -29,8 +29,8 @@ def _assert_public_url(url: str) -> None:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if ip.is_private:
-            raise ValueError(f"URL resolves to private address {ip}")
+        if ip.is_private or ip.is_reserved or ip.is_link_local or ip.is_loopback:
+            raise ValueError(f"URL resolves to non-public address {ip}")
 
 
 def fetch_url(url: str, max_chars: int = 8000) -> str:

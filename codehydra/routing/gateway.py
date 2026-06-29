@@ -279,8 +279,14 @@ class Gateway:
             except Exception:
                 pass
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     @classmethod
     def _parse_usage(cls, cli_name: str, err_output: str) -> Optional[int]:
