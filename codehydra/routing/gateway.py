@@ -151,7 +151,7 @@ class Gateway:
                 port = s.getsockname()[1]
 
             proc = subprocess.Popen(
-                [sys.executable, "-m", "src.mcp.server",
+                [sys.executable, "-m", "codehydra.mcp.server",
                  "--transport", "streamable-http", "--port", str(port)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -205,7 +205,7 @@ class Gateway:
         return {
             "codehydra-tools": {
                 "command": sys.executable,
-                "args": ["-m", "src.mcp.server"],
+                "args": ["-m", "codehydra.mcp.server"],
             }
         }
 

@@ -13,9 +13,8 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.suggester import Suggester
 from textual.widget import Widget
-from textual.widgets import Footer, TextArea, Markdown, Static
+from textual.widgets import TextArea, Markdown, Static
 
 from codehydra.routing.claude_session import THINKING_END, THINKING_START
 from codehydra.routing.constants import CLI, Mode, Role, Tier
@@ -136,20 +135,6 @@ def _skill_names() -> list[str]:
     return [p.stem for p in SKILLS_DIR.glob("*.md")]
 
 
-class SlashSuggester(Suggester):
-    """Suggests slash commands and installed skill names when input starts with '/'."""
-
-    async def get_suggestion(self, value: str) -> str | None:
-        if not value.startswith("/"):
-            return None
-        lower = value.lower()
-        candidates = SLASH_COMMANDS + [f"/skill {n}" for n in _skill_names()]
-        for cmd in candidates:
-            if cmd.startswith(lower) and cmd != lower:
-                return cmd
-        return None
-
-
 class PromptTextArea(TextArea):
     """Prompt input where Enter submits and Ctrl+Enter adds a newline."""
 
@@ -201,45 +186,41 @@ class HydraApp(App):
     CSS = """
     #history {
         height: 1fr;
-        padding: 0 1;
+        padding: 0 2;
     }
     #status {
         height: 1;
         background: $boost;
         color: $text-muted;
-        padding: 0 1;
+        padding: 0 2;
     }
     #input-area {
         height: auto;
         max-height: 8;
         padding: 0 1;
         border: solid $accent;
+        margin: 0 1;
     }
     .user-msg {
         color: $accent;
-        padding: 0 1;
         margin-top: 1;
     }
     .thinking-active {
         color: $text-muted;
         text-style: italic;
-        padding: 0 2;
+        padding-left: 2;
         border-left: solid $accent;
         margin-top: 1;
         margin-bottom: 0;
     }
     .thinking-done {
         color: $text-muted;
-        padding: 0 2;
+        padding-left: 2;
         margin-bottom: 0;
     }
     .response-turn {
-        padding: 0 1;
         margin-top: 0;
         margin-bottom: 1;
-    }
-    Markdown {
-        padding: 0 1;
     }
     """
 
@@ -283,7 +264,6 @@ class HydraApp(App):
         text_area = PromptTextArea(id="input-area", language="markdown")
         text_area.text = ""
         yield text_area
-        yield Footer()
 
     def on_mount(self) -> None:
         self._history_scroll = self.query_one("#history", VerticalScroll)
@@ -831,13 +811,26 @@ class HydraApp(App):
     _AT_PARTIAL_RE = re.compile(r"@([\w./\-]*)$")
 
     def _complete_at_ref(self) -> None:
-        """Tab-complete @path tokens in the input area."""
+        """Tab-complete: @path file tokens and /slash commands."""
         area = self.query_one("#input-area", TextArea)
         text = area.text
         row, col = area.cursor_location
         lines = text.split("\n")
         line = lines[row] if row < len(lines) else ""
         before = line[:col]
+
+        # /command completion
+        if before.startswith("/") and " " not in before:
+            lower = before.lower()
+            candidates = SLASH_COMMANDS + [f"/skill {n}" for n in _skill_names()]
+            match = next((c for c in candidates if c.startswith(lower) and c != lower), None)
+            if match:
+                lines[row] = match + line[col:]
+                area.text = "\n".join(lines)
+                area.move_cursor((row, len(match)))
+            return
+
+        # @path completion
         m = self._AT_PARTIAL_RE.search(before)
         if not m:
             area.insert("    ")
@@ -918,10 +911,10 @@ class HydraApp(App):
         # Throttle Markdown re-renders: only push UI update every 100ms to avoid
         # re-parsing the full markdown tree on every streamed token.
         _MD_INTERVAL = 0.1  # seconds
-        # Thinking indicator cycles through these frames at each 500-char milestone.
         _THINK_FRAMES = ("⟳", "◐", "◓", "◑", "◒")
+        _MAX_BUILD_RETRIES = 3
 
-        while True:
+        for _build_attempt in range(_MAX_BUILD_RETRIES):
             if self._cancel_event.is_set():
                 return
             md_w = self.call_from_thread(self._add_response_turn)
@@ -1017,7 +1010,11 @@ class HydraApp(App):
                 self.call_from_thread(self._add_message, Text("✅ Build successful!", style="bold green"))
                 return
 
-            self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra...", style="bold red"))
+            attempt_num = _build_attempt + 1
+            if attempt_num >= _MAX_BUILD_RETRIES:
+                self.call_from_thread(self._add_message, Text(f"❌ Build failed after {attempt_num} attempts. Stopping.", style="bold red"))
+                return
+            self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra… (attempt {attempt_num}/{_MAX_BUILD_RETRIES})", style="bold red"))
             prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
 
     # Auto-compact when non-system history exceeds this many characters.
@@ -1184,7 +1181,7 @@ class HydraApp(App):
         self._save_session()
 
 
-    @work(thread=True, group="git")
+    @work(thread=True, exclusive=True, group="git")
     def _run_commit(self, message_override: str = "") -> None:
         check = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, text=True)
         if check.returncode != 0:
@@ -1231,7 +1228,7 @@ class HydraApp(App):
         else:
             self.call_from_thread(self._add_message, Text(f"✗ {result.stderr.strip()}", style="red"))
 
-    @work(thread=True, group="git")
+    @work(thread=True, exclusive=True, group="git")
     def _run_pr(self, title_override: str = "") -> None:
         if not shutil.which("gh"):
             self.call_from_thread(self._add_message, Text("'gh' not found. Install: https://cli.github.com/", style="red"))
