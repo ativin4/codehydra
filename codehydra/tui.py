@@ -17,16 +17,16 @@ from textual.suggester import Suggester
 from textual.widget import Widget
 from textual.widgets import Footer, TextArea, Markdown, Static
 
-from src.routing.claude_session import THINKING_END, THINKING_START
-from src.routing.constants import CLI, Mode, Role, Tier
-from src.routing.gateway import Gateway
-from src.routing.oss_provider import OllamaProvider
-from src.routing.session import SessionManager
-from src.tools.compiler import Compiler
-from src.tools.media import MEDIA_EXTS, image_to_base64, pdf_to_text
-from src.tools.patcher import Patcher
-from src.tools.scanner import Scanner
-from src.tools.websearch import fetch_url, format_results, search
+from codehydra.routing.claude_session import THINKING_END, THINKING_START
+from codehydra.routing.constants import CLI, Mode, Role, Tier
+from codehydra.routing.gateway import Gateway
+from codehydra.routing.oss_provider import OllamaProvider
+from codehydra.routing.session import SessionManager
+from codehydra.tools.compiler import Compiler
+from codehydra.tools.media import MEDIA_EXTS, image_to_base64, pdf_to_text
+from codehydra.tools.patcher import Patcher
+from codehydra.tools.scanner import Scanner
+from codehydra.tools.websearch import fetch_url, format_results, search
 
 
 SKILLS_DIR = Path(".codehydra/skills")
@@ -804,7 +804,7 @@ class HydraApp(App):
             table.add_row(name, path_txt, auth_txt)
 
         # MCP server
-        from src.routing.gateway import _SHARED_MCP
+        from codehydra.routing.gateway import _SHARED_MCP
         mcp_port = _SHARED_MCP.get("port")
         mcp_line = Text(
             f"✓ MCP server running on port {mcp_port}" if mcp_port else "✗ MCP server not started",

@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from src.tools.patcher import Patcher
+from codehydra.tools.patcher import Patcher
 
 class TestPatcher(unittest.TestCase):
     def setUp(self):

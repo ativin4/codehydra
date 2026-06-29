@@ -39,12 +39,12 @@ def _static_texts(app) -> list[str]:
 
 def _make_tui_app(tmp_path):
     """HydraApp with mocked Gateway/Scanner/SessionManager for fast headless tests."""
-    import src.tui as tui_mod
-    from src.routing.constants import CLI
+    import codehydra.tui as tui_mod
+    from codehydra.routing.constants import CLI
 
-    with patch("src.tui.Gateway") as MockGW, \
-         patch("src.tui.Scanner") as MockScanner, \
-         patch("src.tui.SessionManager") as MockSM:
+    with patch("codehydra.tui.Gateway") as MockGW, \
+         patch("codehydra.tui.Scanner") as MockScanner, \
+         patch("codehydra.tui.SessionManager") as MockSM:
 
         gw_inst = MagicMock()
         gw_inst.cli_auth_status = {
@@ -94,7 +94,7 @@ class TestURLTrailingPunct:
     """Bug 3: @url tokens must have trailing punct stripped before fetching."""
 
     def _make_app(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -119,7 +119,7 @@ class TestURLTrailingPunct:
             fetched_urls.append(url)
             return "content"
 
-        with patch("src.tui.fetch_url", side_effect=fake_fetch):
+        with patch("codehydra.tui.fetch_url", side_effect=fake_fetch):
             app._expand_file_refs(f"@https://example.com{suffix} text")
 
         assert fetched_urls == [expected_url]
@@ -133,7 +133,7 @@ class TestURLTrailingPunct:
             fetched.append(url)
             return "ok"
 
-        with patch("src.tui.fetch_url", side_effect=fake_fetch):
+        with patch("codehydra.tui.fetch_url", side_effect=fake_fetch):
             app._expand_file_refs("@https://docs.python.org/3/library/pathlib.html text")
 
         assert fetched == ["https://docs.python.org/3/library/pathlib.html"]
@@ -143,8 +143,8 @@ class TestResumeRebuildsSystemMsg:
     """Bug 2: /resume must rebuild system_msg from fresh workspace scan."""
 
     def test_resume_updates_system_msg_and_history0(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
-        from src.routing.constants import Role
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import Role
 
         monkeypatch.chdir(tmp_path)
         mem_file = tmp_path / "memory.md"
@@ -198,8 +198,8 @@ class TestDoCompactPicksBestCLI:
     """Bug 7: _do_compact must pick best authenticated CLI, not self.cli_override."""
 
     def _seed_app(self, tmp_path, monkeypatch, auth_status):
-        import src.tui as tui_mod
-        from src.routing.constants import CLI, Mode, Role
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import CLI, Mode, Role
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
@@ -225,32 +225,32 @@ class TestDoCompactPicksBestCLI:
         return app, used_clis
 
     def test_picks_claude_over_override(self, tmp_path, monkeypatch):
-        from src.routing.constants import CLI
+        from codehydra.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
             {CLI.CLAUDE: True, CLI.AGY: True, CLI.CODEX: False},
         )
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
         assert used_clis and used_clis[0] == CLI.CLAUDE
 
     def test_falls_back_to_agy_when_claude_absent(self, tmp_path, monkeypatch):
-        from src.routing.constants import CLI
+        from codehydra.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
             {CLI.CLAUDE: False, CLI.AGY: True, CLI.CODEX: False},
         )
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
         assert used_clis and used_clis[0] == CLI.AGY
 
     def test_falls_back_to_override_when_none_authenticated(self, tmp_path, monkeypatch):
-        from src.routing.constants import CLI
+        from codehydra.routing.constants import CLI
         app, used_clis = self._seed_app(
             tmp_path, monkeypatch,
             {CLI.CLAUDE: False, CLI.AGY: False, CLI.CODEX: False},
         )
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         tui_mod.HydraApp._do_compact(app)
         assert used_clis and used_clis[0] == CLI.AGY  # fallback to self.cli_override
 
@@ -260,8 +260,8 @@ class TestOllamaExcludedFromAuthWarning:
 
     @pytest.mark.parametrize("ollama_ok", [True, False])
     def test_ollama_never_in_unauthenticated(self, ollama_ok):
-        from src.routing.constants import CLI
-        from src.routing.gateway import Gateway
+        from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import Gateway
 
         auth = {CLI.CLAUDE: False, CLI.AGY: False, CLI.CODEX: False, CLI.OLLAMA: ollama_ok}
         unauthenticated = [c for c, ok in auth.items() if not ok and c in Gateway.LOGIN_COMMANDS]
@@ -273,8 +273,8 @@ class TestCompareAppendsHistory:
 
     def test_compare_appends_user_and_assistant(self, tmp_path, monkeypatch):
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import src.tui as tui_mod
-        from src.routing.constants import CLI, Mode, Role
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import CLI, Mode, Role
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
@@ -343,7 +343,7 @@ class TestTUIHeadless:
 
     async def test_clear_resets_history_list(self, tmp_cwd):
         """/clear must leave only the system entry in app.history."""
-        from src.routing.constants import Role
+        from codehydra.routing.constants import Role
 
         app = _make_tui_app(tmp_cwd)
         app.history.append({"role": Role.USER, "content": "hi"})
@@ -364,7 +364,7 @@ class TestTUIHeadless:
 
     async def test_remember_and_memory_show_fact(self, tmp_cwd):
         """/remember saves fact; /memory renders it as Markdown."""
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         from textual.widgets import Markdown
 
         tui_mod.MEMORY_FILE = tmp_cwd / ".codehydra" / "memory.md"
@@ -385,7 +385,7 @@ class TestTUIHeadless:
             assert app.effort_tier == "high"
 
     async def test_mode_plan_sets_mode(self, tmp_cwd):
-        from src.routing.constants import Mode
+        from codehydra.routing.constants import Mode
 
         app = _make_tui_app(tmp_cwd)
         async with app.run_test(headless=True, size=(120, 40)) as pilot:
@@ -407,7 +407,7 @@ class TestTUIHeadless:
             assert any("no saved sessions" in t.lower() for t in texts), texts
 
     async def test_compare_needs_two_clis(self, tmp_cwd):
-        from src.routing.constants import CLI
+        from codehydra.routing.constants import CLI
 
         app = _make_tui_app(tmp_cwd)
         app.gateway.cli_auth_status = {
@@ -437,7 +437,7 @@ class TestTUIHeadless:
 
     async def test_enter_submits_and_ctrl_enter_adds_newline(self, tmp_cwd):
         """Enter submits; Ctrl+Enter inserts a newline in the prompt."""
-        from src.routing.constants import Role
+        from codehydra.routing.constants import Role
         from textual.widgets import TextArea
 
         app = _make_tui_app(tmp_cwd)
@@ -479,9 +479,9 @@ class TestRealCLIEvals:
 
     async def test_prompt_updates_history(self, tmp_cwd):
         """Real prompt through TUI — history gains user+assistant entries."""
-        import src.tui as tui_mod
-        from src.routing.constants import Role
-        from src.routing.gateway import Gateway
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import Role
+        from codehydra.routing.gateway import Gateway
 
         app = _make_tui_app(tmp_cwd)
         app.gateway = Gateway()
@@ -499,9 +499,9 @@ class TestRealCLIEvals:
 
     async def test_compact_shortens_history(self, tmp_cwd):
         """/compact with 8+ turns summarises and shrinks history."""
-        import src.tui as tui_mod
-        from src.routing.constants import Role
-        from src.routing.gateway import Gateway
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import Role
+        from codehydra.routing.gateway import Gateway
 
         app = _make_tui_app(tmp_cwd)
         app.gateway = Gateway()
@@ -527,9 +527,9 @@ class TestRealCLIEvals:
 
     async def test_session_save_resume_roundtrip(self, tmp_cwd):
         """Session saved in app1 is fully restored in app2 via /resume."""
-        import src.tui as tui_mod
-        from src.routing.constants import Role
-        from src.routing.session import SessionManager
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import Role
+        from codehydra.routing.session import SessionManager
 
         sm = SessionManager()
         session_id = sm.new_session_id()
@@ -556,8 +556,8 @@ class TestRealCLIEvals:
 
     async def test_web_search_injects_into_history(self, tmp_cwd):
         """Real /search hits DDG and injects result as assistant msg."""
-        import src.tui as tui_mod
-        from src.routing.constants import Role
+        import codehydra.tui as tui_mod
+        from codehydra.routing.constants import Role
 
         app = _make_tui_app(tmp_cwd)
         before = len(app.history)

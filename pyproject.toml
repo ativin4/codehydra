@@ -1,9 +1,26 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "codehydra"
 version = "0.1.0"
 description = "BYOS multi-CLI coding agent — route prompts across Claude, Gemini, Codex and Ollama"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords = ["ai", "llm", "cli", "agent", "tui", "claude", "gemini", "codex", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "google-auth>=2.53.0",
     "mcp>=1.27.2",
@@ -13,8 +30,16 @@ dependencies = [
     "typer>=0.26.7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ativin4/codehydra"
+Repository = "https://github.com/ativin4/codehydra"
+Issues = "https://github.com/ativin4/codehydra.git/issues"
+
 [project.scripts]
-codehydra = "src.cli:app"
+codehydra = "codehydra.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["codehydra*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -24,4 +49,6 @@ testpaths = ["tests"]
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
+    "build>=1.0",
+    "twine>=5.0",
 ]

@@ -7,3 +7,5 @@ __pycache__/
 .agy/
 node_modules/
 .DS_Store
+codehydra.egg-info/
+dist/

@@ -22,7 +22,7 @@ import pytest
 
 class TestSlidingWindow:
     def test_trims_old_turns_for_agy(self):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         gw = Gateway.__new__(Gateway)
         gw._CONTEXT_WINDOW = 4  # small window for testing
 
@@ -48,7 +48,7 @@ class TestSlidingWindow:
         assert len([m for m in result if m["role"] != "system"]) == 4
 
     def test_claude_not_trimmed(self):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         # Claude uses persistent session — no trimming in _build_cmd
         # Just verify the constant exists
         assert hasattr(Gateway, "_CONTEXT_WINDOW")
@@ -62,7 +62,7 @@ class TestSlidingWindow:
 class TestProjectMemory:
     def test_refresh_with_no_memory_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
 
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -74,7 +74,7 @@ class TestProjectMemory:
 
     def test_refresh_prepends_memory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         mem_file = tmp_path / "memory.md"
         mem_file.write_text("- use pytest\n- always type hint\n")
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", mem_file)
@@ -94,7 +94,7 @@ class TestProjectMemory:
     def test_memory_survives_compact(self, tmp_path, monkeypatch):
         """Memory in history[0] must not be wiped by _do_compact."""
         monkeypatch.chdir(tmp_path)
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         mem_file = tmp_path / "memory.md"
         mem_file.write_text("- key fact\n")
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", mem_file)
@@ -116,12 +116,12 @@ class TestProjectMemory:
 
 class TestWebSearch:
     def test_format_results_empty(self):
-        from src.tools.websearch import format_results
+        from codehydra.tools.websearch import format_results
         out = format_results([])
         assert "No results" in out
 
     def test_format_results_populated(self):
-        from src.tools.websearch import format_results
+        from codehydra.tools.websearch import format_results
         results = [
             {"title": "Foo Bar", "url": "https://foo.com", "snippet": "A snippet."},
         ]
@@ -131,7 +131,7 @@ class TestWebSearch:
         assert "snippet" in out
 
     def test_search_returns_results(self):
-        from src.tools.websearch import search
+        from codehydra.tools.websearch import search
         results = search("python pathlib tutorial", max_results=3)
         assert isinstance(results, list)
         assert len(results) >= 1
@@ -141,7 +141,7 @@ class TestWebSearch:
             assert r["url"].startswith("http")
 
     def test_fetch_url_returns_text(self):
-        from src.tools.websearch import fetch_url
+        from codehydra.tools.websearch import fetch_url
         text = fetch_url("https://example.com", max_chars=500)
         assert isinstance(text, str)
         assert len(text) > 10
@@ -154,7 +154,7 @@ class TestWebSearch:
 
 class TestMediaExpansion:
     def _make_app(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -192,7 +192,7 @@ class TestMediaExpansion:
 
     def test_url_fetched_inline(self, tmp_path, monkeypatch):
         app = self._make_app(tmp_path, monkeypatch)
-        with patch("src.tui.fetch_url", return_value="mocked content") as mock_fetch:
+        with patch("codehydra.tui.fetch_url", return_value="mocked content") as mock_fetch:
             expanded, injected, media = app._expand_file_refs(
                 "@https://example.com what does this say"
             )
@@ -207,7 +207,7 @@ class TestMediaExpansion:
 
 class TestBuildCmdMedia:
     def _make_gateway(self):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         gw = Gateway.__new__(Gateway)
         gw._CONTEXT_WINDOW = 30
         gw.mcp_servers = {}
@@ -236,7 +236,7 @@ class TestBuildCmdMedia:
 
         messages = [{"role": "user", "content": "summarize"}]
         with patch("shutil.which", return_value="/usr/bin/claude"), \
-             patch("src.routing.gateway.pdf_to_text", return_value="Extracted text here"):
+             patch("codehydra.routing.gateway.pdf_to_text", return_value="Extracted text here"):
             cmd, _ = gw._build_cmd("claude", messages, "anthropic/claude-sonnet-4-6",
                                     media_files=[pdf])
         # The extracted text should appear in the -p prompt arg
@@ -257,7 +257,7 @@ class TestBuildCmdMedia:
         assert "not supported" in prompt_arg.lower() or "image" in prompt_arg.lower()
 
     def test_ollama_images_base64(self, tmp_path):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         gw = Gateway.__new__(Gateway)
         gw._record_usage = lambda *a, **kw: None
 
@@ -271,7 +271,7 @@ class TestBuildCmdMedia:
             captured.append(msgs)
             return iter(["ok"])
 
-        with patch("src.routing.gateway.OllamaProvider.generate", side_effect=fake_generate):
+        with patch("codehydra.routing.gateway.OllamaProvider.generate", side_effect=fake_generate):
             list(gw._run_oss_stream("ollama/llava", messages, media_files=[img]))
 
         assert captured
@@ -288,7 +288,7 @@ class TestBuildCmdMedia:
 
 class TestDoctor:
     def _make_app(self, tmp_path, monkeypatch, mem_file=None):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         mem = mem_file or (tmp_path / "memory.md")
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", mem)
@@ -305,7 +305,7 @@ class TestDoctor:
         return app
 
     def test_doctor_renders_table(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         from rich.console import Group
         from rich.table import Table
 
@@ -320,8 +320,8 @@ class TestDoctor:
         assert isinstance(result._renderables[0], Table)
 
     def test_doctor_shows_mcp_port(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
-        import src.routing.gateway as gw_mod
+        import codehydra.tui as tui_mod
+        import codehydra.routing.gateway as gw_mod
         from rich.console import Group
 
         monkeypatch.setattr(gw_mod, "_SHARED_MCP", {"port": 9999, "proc": None})
@@ -335,7 +335,7 @@ class TestDoctor:
         assert "9999" in mcp_text
 
     def test_doctor_shows_memory_when_present(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         from rich.console import Group
 
         mem = tmp_path / "memory.md"
@@ -364,7 +364,7 @@ class TestCloudCLI:
             pytest.skip("claude CLI not on PATH")
 
     def test_simple_request(self):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         gw = Gateway()
         result = gw.request(
             "Reply with exactly: HYDRA_OK",
@@ -374,7 +374,7 @@ class TestCloudCLI:
         assert "HYDRA_OK" in result
 
     def test_stream_request(self):
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         gw = Gateway()
         chunks = list(gw.request_stream(
             "Reply with exactly: STREAM_OK",
@@ -386,7 +386,7 @@ class TestCloudCLI:
 
     def test_memory_injected_in_system(self):
         """_build_cmd must pass history's system entry via --system-prompt for Claude."""
-        from src.routing.gateway import Gateway
+        from codehydra.routing.gateway import Gateway
         import subprocess as _sp
 
         marker = "XHYDRA_TEST_MARKER_42X"
@@ -403,7 +403,7 @@ class TestCloudCLI:
             return fake_result
 
         gw = Gateway()
-        with patch("src.routing.gateway.subprocess.run", spy_run):
+        with patch("codehydra.routing.gateway.subprocess.run", spy_run):
             gw.request(
                 "dummy prompt",
                 tier="low",
@@ -426,8 +426,8 @@ class TestCloudCLI:
         pytest.skip("Requires a real PDF file — manual test")
 
     def test_web_search_injects_context(self):
-        from src.routing.gateway import Gateway
-        from src.tools.websearch import format_results, search
+        from codehydra.routing.gateway import Gateway
+        from codehydra.tools.websearch import format_results, search
         gw = Gateway()
         results = search("Python pathlib", max_results=2)
         ctx = format_results(results)
@@ -445,7 +445,7 @@ class TestCloudCLI:
 
 class TestAtFileComplete:
     def _make_app(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -455,18 +455,18 @@ class TestAtFileComplete:
 
     def test_at_partial_re_matches_partial_path(self, tmp_path, monkeypatch):
         import re
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         m = tui_mod.HydraApp._AT_PARTIAL_RE.search("describe @src/rout")
         assert m is not None
         assert m.group(1) == "src/rout"
 
     def test_at_partial_re_no_match_url(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         m = tui_mod.HydraApp._AT_PARTIAL_RE.search("@https://example.com")
         assert m is None or "https" not in m.group(1)
 
     def test_at_partial_re_no_match_mid_word(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         m = tui_mod.HydraApp._AT_PARTIAL_RE.search("@foo bar")
         assert m is None
 
@@ -477,7 +477,7 @@ class TestAtFileComplete:
 
 class TestCommit:
     def _make_app(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -517,7 +517,7 @@ class TestCommit:
                 r.stdout = ""
             return r
 
-        with patch("src.tui.subprocess.run", side_effect=fake_run):
+        with patch("codehydra.tui.subprocess.run", side_effect=fake_run):
             app._run_commit.__wrapped__(app, "fix: my message")
 
         commit_calls = [c for c in calls if "commit" in c]
@@ -534,7 +534,7 @@ class TestCommit:
             r.stderr = ""
             return r
 
-        with patch("src.tui.subprocess.run", side_effect=fake_run):
+        with patch("codehydra.tui.subprocess.run", side_effect=fake_run):
             app._run_commit.__wrapped__(app, "")
 
         msgs = [str(w) for w in app._captured]
@@ -547,7 +547,7 @@ class TestCommit:
 
 class TestPR:
     def _make_app(self, tmp_path, monkeypatch):
-        import src.tui as tui_mod
+        import codehydra.tui as tui_mod
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
         app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
@@ -568,7 +568,7 @@ class TestPR:
 
     def test_pr_no_gh_cli(self, tmp_path, monkeypatch):
         app = self._make_app(tmp_path, monkeypatch)
-        with patch("src.tui.shutil.which", return_value=None):
+        with patch("codehydra.tui.shutil.which", return_value=None):
             app._run_pr.__wrapped__(app, "")
         msgs = [str(w) for w in app._captured]
         assert any("gh" in m.lower() for m in msgs)
@@ -584,8 +584,8 @@ class TestPR:
             r.stderr = ""
             return r
 
-        with patch("src.tui.shutil.which", return_value="/usr/bin/gh"), \
-             patch("src.tui.subprocess.run", side_effect=fake_run):
+        with patch("codehydra.tui.shutil.which", return_value="/usr/bin/gh"), \
+             patch("codehydra.tui.subprocess.run", side_effect=fake_run):
             app._run_pr.__wrapped__(app, "")
 
         msgs = [str(w) for w in app._captured]

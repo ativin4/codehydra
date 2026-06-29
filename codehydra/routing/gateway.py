@@ -9,14 +9,14 @@ import threading
 import time
 from pathlib import Path
 from typing import Generator, List, Dict, Optional
-from src.auth.scavenger import Scavenger
-from src.routing.classifier import Classifier
-from src.routing.config import load_routing_config
-from src.routing.claude_session import ClaudeSession
-from src.routing.oss_provider import OllamaProvider
-from src.mcp.config import load_mcp_servers
-from src.routing.constants import CLI, Mode, Role, Tier
-from src.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_base64, pdf_to_text
+from codehydra.auth.scavenger import Scavenger
+from codehydra.routing.classifier import Classifier
+from codehydra.routing.config import load_routing_config
+from codehydra.routing.claude_session import ClaudeSession
+from codehydra.routing.oss_provider import OllamaProvider
+from codehydra.mcp.config import load_mcp_servers
+from codehydra.routing.constants import CLI, Mode, Role, Tier
+from codehydra.tools.media import IMAGE_EXTS, PDF_EXTS, VIDEO_EXTS, image_to_base64, pdf_to_text
 
 
 # Shared persistent MCP HTTP server (started once per process, reused by all
@@ -562,7 +562,7 @@ class Gateway:
         tokens = None
         yielded_any = False
         try:
-            from src.routing.claude_session import THINKING_START, THINKING_END
+            from codehydra.routing.claude_session import THINKING_START, THINKING_END
             sentinels = {THINKING_START, THINKING_END}
             for chunk, line_tokens in self._claude_session.send(current_prompt):
                 if line_tokens is not None:

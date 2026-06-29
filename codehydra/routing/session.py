@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.routing.constants import Role
+from codehydra.routing.constants import Role
 
 _SESSION_ID_RE = re.compile(r'^[\w\-]{1,80}$')
 _VALID_ROLES = set(Role)

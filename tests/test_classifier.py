@@ -1,5 +1,5 @@
 import unittest
-from src.routing.classifier import Classifier
+from codehydra.routing.classifier import Classifier
 
 class TestClassifier(unittest.TestCase):
     def setUp(self):

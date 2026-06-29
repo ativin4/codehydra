@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import List
 
 from mcp.server.fastmcp import FastMCP
-from src.routing.gateway import Gateway
+from codehydra.routing.gateway import Gateway
 
 mcp = FastMCP("codehydra-tools", log_level="ERROR")
 

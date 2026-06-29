@@ -1,6 +1,6 @@
 import typer
 
-from src.tui import HydraApp
+from codehydra.tui import HydraApp
 
 app = typer.Typer()
 
