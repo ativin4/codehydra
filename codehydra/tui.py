@@ -869,6 +869,7 @@ class HydraApp(App):
         import os as _os
         import tempfile
         editor = _os.environ.get("EDITOR") or _os.environ.get("VISUAL") or "vi"
+        editor_parts = shlex.split(editor)
         area = self.query_one("#input-area", TextArea)
         current = area.text
         try:
@@ -876,7 +877,7 @@ class HydraApp(App):
                 f.write(current)
                 tmp_path = Path(f.name)
             with self.suspend():
-                subprocess.run([editor, str(tmp_path)], check=False)
+                subprocess.run(editor_parts + [str(tmp_path)], check=False)
             area.text = tmp_path.read_text()
             area.move_cursor_to_end()
         except Exception as e:

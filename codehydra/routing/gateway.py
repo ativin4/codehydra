@@ -571,6 +571,14 @@ class Gateway:
                     if chunk not in sentinels:
                         yielded_any = True
                     yield chunk
+        except GeneratorExit:
+            # User cancelled mid-stream. Kill and nullify the session so the
+            # next turn starts fresh — avoids reading leftover chunks from the
+            # abandoned response off the queue.
+            self._claude_session.close()
+            self._claude_session = None
+            self._claude_history_len = 0
+            raise
         except Exception as e:
             self._claude_session.close()
             self._claude_session = None
@@ -819,8 +827,6 @@ class Gateway:
                 if self._RATE_LIMIT_RE.search(str(e)):
                     self._mark_rate_limited(self._cli_for_model(model))
                 last_exception = e
-                error_msg = str(e).split("\n")[0]
-                print(f"Error on {model}: {error_msg}")
                 continue
 
         raise last_exception or Exception("All CLIs failed. No active subscriptions found.")
@@ -872,8 +878,6 @@ class Gateway:
                 if self._RATE_LIMIT_RE.search(str(e)):
                     self._mark_rate_limited(self._cli_for_model(model))
                 last_exception = e
-                error_msg = str(e).split("\n")[0]
-                print(f"Error on {model}: {error_msg}")
                 continue
 
             yield first_chunk
@@ -881,13 +885,3 @@ class Gateway:
             return
 
         raise last_exception or Exception("All CLIs failed. No active subscriptions found.")
-
-
-if __name__ == "__main__":
-    gateway = Gateway()
-    # Basic test
-    try:
-        res = gateway.request("Say hello", tier="low")
-        print(f"Response: {res}")
-    except Exception as e:
-        print(f"Test failed: {e}")

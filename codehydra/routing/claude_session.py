@@ -43,13 +43,23 @@ class ClaudeSession:
             text=True, bufsize=1,
         )
         self._lines: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._stderr_lines: list[str] = []
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True)
         self._reader.start()
+        self._stderr_reader.start()
 
     def _read_loop(self) -> None:
         for line in self._proc.stdout:
             self._lines.put(line)
         self._lines.put(None)
+
+    def _drain_stderr(self) -> None:
+        for line in self._proc.stderr:
+            self._stderr_lines.append(line)
+
+    def _get_stderr(self) -> str:
+        return "".join(self._stderr_lines[-50:]).strip()
 
     def matches(self, model: str, mode_flags: List[str], system_prompt: str = "") -> bool:
         return (self.model == model and self.mode_flags == mode_flags
@@ -62,8 +72,7 @@ class ClaudeSession:
         """Sends one user turn and yields (text_chunk, total_tokens) until the
         turn's "result" event arrives. Raises if the process has exited."""
         if not self.alive():
-            err = self._proc.stderr.read().strip()
-            raise Exception(f"claude session is no longer running: {err}")
+            raise Exception(f"claude session is no longer running: {self._get_stderr()}")
 
         msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}}
         self._proc.stdin.write(json.dumps(msg) + "\n")
@@ -73,8 +82,7 @@ class ClaudeSession:
         while True:
             line = self._lines.get()
             if line is None:
-                err = self._proc.stderr.read().strip()
-                raise Exception(f"claude session ended unexpectedly: {err}")
+                raise Exception(f"claude session ended unexpectedly: {self._get_stderr()}")
             line = line.strip()
             if not line:
                 continue
