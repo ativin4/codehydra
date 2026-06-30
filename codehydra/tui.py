@@ -1349,6 +1349,7 @@ class HydraApp(App):
         """Show background tasks spawned via the run_in_background MCP tool."""
         from codehydra.mcp.server import BG_DIR
         import json as _json
+        import os as _os
         if not BG_DIR.exists():
             self._add_message(Text("No background tasks yet.", style="dim"))
             return
@@ -1375,7 +1376,7 @@ class HydraApp(App):
                 lines = log_path.read_text().splitlines()
                 tail = lines[-1][:60] if lines else ""
             try:
-                os.kill(meta["pid"], 0)
+                _os.kill(meta["pid"], 0)
                 status = Text("running", style="green")
             except OSError:
                 status = Text("done", style="dim")
