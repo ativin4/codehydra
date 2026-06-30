@@ -120,6 +120,7 @@ HELP_TEXT = """\
 
 **Spec-Driven Development (SDD)**
 | `/sdd <task>` | Phase 1: spec agent creates structured plan. Phase 2: parallel agents implement each task. |
+| `/loop [N] <prompt>` | Repeat prompt N times (omit N for infinite). Ctrl+C stops the loop. |
 
 **Background Tasks**
 | `/tasks` | List background tasks spawned by agents (via `run_in_background` MCP tool) |
@@ -256,18 +257,23 @@ class HydraApp(App):
         # Tracks whether the main prompt worker is running.
         self._request_active = False
         self._cancel_event = threading.Event()
+        self._loop_stop = threading.Event()
         # Counter for background workers (parallel/sdd/compare/commit/search…).
         # Distinct from _request_active so both can be true simultaneously.
         self._active_workers = 0
 
     def on_unmount(self) -> None:
+        import signal as _signal
+        prev = getattr(self, "_prev_sigint", _signal.SIG_DFL)
+        _signal.signal(_signal.SIGINT, prev)
         self._save_session()
         self.gateway.close(stop_mcp_server=True)
 
     def _cancel_request(self) -> None:
-        """Signal the active request worker to abort on the next chunk."""
+        if self._cancel_event.is_set():
+            return
         self._cancel_event.set()
-        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
+        self._cancel_request_ui()
 
     def _inc_workers(self) -> None:
         self._active_workers = getattr(self, "_active_workers", 0) + 1
@@ -284,7 +290,29 @@ class HydraApp(App):
         text_area.text = ""
         yield text_area
 
+    def _handle_sigint(self, signum, frame) -> None:
+        import asyncio as _asyncio
+        if getattr(self, "_request_active", False) and not self._cancel_event.is_set():
+            self._cancel_event.set()
+            self._loop_stop.set()
+            try:
+                loop = _asyncio.get_event_loop()
+                loop.call_soon_threadsafe(self._cancel_request_ui)
+            except Exception:
+                pass
+        elif getattr(self, "_active_workers", 0) == 0:
+            try:
+                loop = _asyncio.get_event_loop()
+                loop.call_soon_threadsafe(self.exit)
+            except Exception:
+                raise KeyboardInterrupt
+
+    def _cancel_request_ui(self) -> None:
+        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
+
     def on_mount(self) -> None:
+        import signal as _signal
+        self._prev_sigint = _signal.signal(_signal.SIGINT, self._handle_sigint)
         self._history_scroll = self.query_one("#history", VerticalScroll)
         auth_status = self.gateway.cli_auth_status
         ready = [cli for cli, ok in auth_status.items() if ok]
@@ -777,6 +805,20 @@ class HydraApp(App):
             self._run_doctor()
         elif cmd == "tasks":
             self._show_tasks()
+        elif cmd.startswith("loop"):
+            rest = user_input[len("/loop"):].strip()
+            parts = rest.split(None, 1)
+            if not rest:
+                self._add_message(Text("Usage: /loop [N] <prompt>  (N=count, omit for infinite)", style="red"))
+            elif parts and parts[0].isdigit():
+                count = int(parts[0])
+                prompt = parts[1].strip() if len(parts) > 1 else ""
+                if not prompt:
+                    self._add_message(Text("Usage: /loop [N] <prompt>", style="red"))
+                else:
+                    self._run_loop(prompt, count)
+            else:
+                self._run_loop(rest, -1)
         elif cmd.startswith("commit"):
             msg_override = user_input[len("/commit"):].strip()
             self._run_commit(msg_override)
@@ -935,6 +977,27 @@ class HydraApp(App):
             self._run_prompt_inner(prompt, media_files)
         finally:
             self.call_from_thread(self._set_request_active, False)
+
+    @work(thread=True, exclusive=True, group="prompt")
+    def _run_loop(self, prompt: str, count: int) -> None:
+        """Repeat prompt count times (count=-1 = infinite). Ctrl+C stops loop."""
+        self._loop_stop.clear()
+        iteration = 0
+        while not self._loop_stop.is_set():
+            if count != -1 and iteration >= count:
+                break
+            iteration += 1
+            label = f"♻ Loop iteration {iteration}" + (f"/{count}" if count != -1 else "")
+            self.call_from_thread(self._add_message, Text(label, style="dim cyan"))
+            self._cancel_event.clear()
+            self.call_from_thread(self._set_request_active, True)
+            try:
+                self._run_prompt_inner(prompt)
+            finally:
+                self.call_from_thread(self._set_request_active, False)
+            if self._cancel_event.is_set():
+                break
+        self.call_from_thread(self._add_message, Text(f"♻ Loop done ({iteration} iteration{'s' if iteration != 1 else ''})", style="dim cyan"))
 
     def _set_request_active(self, active: bool) -> None:
         self._request_active = active
