@@ -1,25 +1,49 @@
 from typing import Dict, Any
 
-class Classifier:
-    def __init__(self):
-        pass
+# Keywords that signal a heavy architectural task — use the highest-effort model.
+_HIGH_KEYWORDS = frozenset({
+    "refactor", "architect", "rewrite", "redesign", "migrate",
+    "entire codebase", "whole codebase", "from scratch",
+})
 
+# Keywords that keep a prompt on "low" (quick, no-op interactions).
+# Everything else defaults to medium so coding tasks get sonnet, not haiku.
+_LOW_KEYWORDS = frozenset({
+    "hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "cool",
+    "bye", "exit", "quit", "yes", "no", "sure",
+})
+
+
+class Classifier:
     def evaluate(self, prompt: str) -> str:
-        """Evaluates the complexity of the prompt and returns an effort tier."""
-        prompt_lower = prompt.lower()
-        
-        # Heuristics for complexity
-        # This is a placeholder for a more advanced classifier
-        if any(word in prompt_lower for word in ["refactor", "complex", "architect", "rewrite", "debug this large file"]):
+        """Maps a prompt to an effort tier (low / medium / high)."""
+        words = prompt.strip().split()
+        lower = prompt.lower().strip()
+
+        # High: explicit heavy-lifting keywords.
+        if any(kw in lower for kw in _HIGH_KEYWORDS):
             return "high"
-        
-        if len(prompt.split()) > 50 or any(word in prompt_lower for word in ["implement", "create", "test", "fix"]):
-            return "medium"
-        
-        return "low"
+
+        # Low: very short single-word / greeting interactions.
+        if len(words) <= 3 and lower in _LOW_KEYWORDS:
+            return "low"
+
+        # Medium: everything else — the sensible default for coding tasks.
+        # Haiku is fast but too weak for planning, explaining, or writing code.
+        return "medium"
+
 
 if __name__ == "__main__":
-    classifier = Classifier()
-    print(f" 'hi' -> {classifier.evaluate('hi')}")
-    print(f" 'fix this bug in the login flow' -> {classifier.evaluate('fix this bug in the login flow')}")
-    print(f" 'refactor the entire auth system for better security' -> {classifier.evaluate('refactor the entire auth system for better security')}")
+    c = Classifier()
+    cases = [
+        "hi",
+        "thanks",
+        "plan a new auth flow for the app",
+        "fix this bug",
+        "what is this code doing",
+        "explain the gateway module",
+        "refactor the entire auth system",
+        "architect a new microservice",
+    ]
+    for p in cases:
+        print(f"{c.evaluate(p):8}  {p}")

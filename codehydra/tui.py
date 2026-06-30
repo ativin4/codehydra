@@ -72,6 +72,7 @@ SLASH_COMMANDS = [
     "/doctor",
     "/commit",
     "/pr",
+    "/tasks",
 ]
 
 HELP_TEXT = """\
@@ -115,6 +116,9 @@ HELP_TEXT = """\
 | `/resume [id]` | Resume a session (defaults to most recent) |
 | `/cost` | Per-turn CLI/model/tier and token usage |
 | `/clear` | Reset conversation history |
+
+**Background Tasks**
+| `/tasks` | List background tasks spawned by agents (via `run_in_background` MCP tool) |
 
 **Git**
 | `/commit [msg]` | Stage all + AI commit message (or pass your own) |
@@ -741,6 +745,8 @@ class HydraApp(App):
             self._add_message(Markdown(HELP_TEXT))
         elif cmd == "doctor":
             self._run_doctor()
+        elif cmd == "tasks":
+            self._show_tasks()
         elif cmd.startswith("commit"):
             msg_override = user_input[len("/commit"):].strip()
             self._run_commit(msg_override)
@@ -1188,6 +1194,44 @@ class HydraApp(App):
             self.history.append({"role": Role.ASSISTANT, "content": f"[Compare]\n{combined}"})
         self._save_session()
 
+
+    def _show_tasks(self) -> None:
+        """Show background tasks spawned via the run_in_background MCP tool."""
+        from codehydra.mcp.server import BG_DIR
+        import json as _json
+        if not BG_DIR.exists():
+            self._add_message(Text("No background tasks yet.", style="dim"))
+            return
+        task_dirs = sorted(BG_DIR.iterdir())
+        if not task_dirs:
+            self._add_message(Text("No background tasks yet.", style="dim"))
+            return
+        rows = []
+        for task_dir in task_dirs:
+            meta_path = task_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta = _json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            log_path = task_dir / "output.log"
+            tail = ""
+            if log_path.exists():
+                lines = log_path.read_text().splitlines()
+                tail = lines[-1][:80] if lines else ""
+            try:
+                os.kill(meta["pid"], 0)
+                status = "running"
+                style = "green"
+            except OSError:
+                status = "done"
+                style = "dim"
+            rows.append(Text(
+                f"[{task_dir.name}] {status}  {meta['command'][:50]}  {tail}",
+                style=style,
+            ))
+        self._add_message(Group(*rows) if rows else Text("No background tasks yet.", style="dim"))
 
     @work(thread=True, exclusive=True, group="git")
     def _run_commit(self, message_override: str = "") -> None:
