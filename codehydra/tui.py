@@ -73,6 +73,7 @@ SLASH_COMMANDS = [
     "/commit",
     "/pr",
     "/tasks",
+    "/sdd",
 ]
 
 HELP_TEXT = """\
@@ -116,6 +117,9 @@ HELP_TEXT = """\
 | `/resume [id]` | Resume a session (defaults to most recent) |
 | `/cost` | Per-turn CLI/model/tier and token usage |
 | `/clear` | Reset conversation history |
+
+**Spec-Driven Development (SDD)**
+| `/sdd <task>` | Phase 1: spec agent creates structured plan. Phase 2: parallel agents implement each task. |
 
 **Background Tasks**
 | `/tasks` | List background tasks spawned by agents (via `run_in_background` MCP tool) |
@@ -311,11 +315,12 @@ class HydraApp(App):
             parts.append(f"effort:{self.effort_tier}")
         if self.mode != Mode.YOLO:
             parts.append(f"mode:{self.mode}")
-        if self.usage_log and not self.cli_override:
+        if self.usage_log:
             last = self.usage_log[-1]
             display_cli = _CLI_DISPLAY.get(last["cli"], last["cli"])
             short_model = last["model"].split("/")[-1]
-            parts.append(f"via {display_cli}/{short_model}")
+            tier_tag = f"/{last['tier']}" if last.get("tier") else ""
+            parts.append(f"via {display_cli}/{short_model}{tier_tag}")
         rl_parts = []
         for name in CLI:
             secs = self.gateway.rate_limit_resets_in(name)
@@ -642,6 +647,12 @@ class HydraApp(App):
                     Text(f"Total tokens (where reported): {total_tokens}", style="dim"),
                     Text("Note: BYOS subscriptions are flat-rate; token counts are usage indicators, not billed cost.", style="dim"),
                 ))
+        elif cmd.startswith("sdd"):
+            task = user_input[len("/sdd"):].strip()
+            if not task:
+                self._add_message(Text('Usage: /sdd <task description>', style="red"))
+            else:
+                self._run_sdd(task)
         elif cmd.startswith("parallel"):
             try:
                 prompts = shlex.split(user_input[len("/parallel"):].strip())
@@ -1100,6 +1111,100 @@ class HydraApp(App):
         content = f"[Web search results for: {query}]\n{formatted}"
         self.history.append({"role": Role.USER,      "content": f"/search {query}"})
         self.history.append({"role": Role.ASSISTANT, "content": content})
+
+    @work(thread=True, group="parallel")
+    def _run_sdd(self, task: str) -> None:
+        """Spec-Driven Development: spec agent → parse tasks → parallel implementation agents."""
+        import re as _re
+
+        # Phase 1 — spec generation with a high-tier model in plan mode.
+        self.call_from_thread(self._add_message, Text(
+            "SDD phase 1: generating spec…", style="dim yellow"
+        ))
+        spec_prompt = (
+            "You are a software architect. Create a concise spec for this task.\n\n"
+            f"TASK: {task}\n\n"
+            "Respond in this exact format:\n"
+            "## Spec\n"
+            "<one-paragraph description>\n\n"
+            "## Requirements\n"
+            "- <requirement>\n\n"
+            "## Tasks\n"
+            "TASK 1: <fully self-contained implementation prompt — include all context an "
+            "agent needs with zero knowledge of the overall project>\n"
+            "TASK 2: <same>\n"
+            "TASK 3: <same>\n\n"
+            "Rules: 3–5 tasks, each fully independent (no task depends on another's output), "
+            "each reads as a standalone coding prompt."
+        )
+        auth = self.gateway.cli_auth_status
+        best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
+        if not best_cli:
+            self.call_from_thread(self._add_message, Text("No CLI available.", style="red"))
+            return
+        try:
+            spec = self.gateway.request(
+                spec_prompt,
+                tier=Tier.HIGH,
+                history=[],
+                cli_override=best_cli,
+                mode=Mode.PLAN,
+            ).strip()
+        except Exception as e:
+            self.call_from_thread(self._add_message, Text(f"Spec generation failed: {e}", style="red"))
+            return
+
+        self.call_from_thread(self._add_message, Markdown(spec))
+
+        # Phase 2 — parse TASK lines from spec.
+        task_lines = _re.findall(r"^TASK \d+:\s*(.+)$", spec, _re.MULTILINE)
+        if not task_lines:
+            self.call_from_thread(self._add_message, Text(
+                "No TASK lines found in spec output. Try rephrasing or use /parallel.", style="yellow"
+            ))
+            return
+
+        self.call_from_thread(self._add_message, Text(
+            f"SDD phase 2: running {len(task_lines)} parallel agents…", style="dim yellow"
+        ))
+
+        # Phase 3 — parallel implementation (each task gets its own Gateway instance).
+        parent_auth = self.gateway.cli_auth_status
+        history_snapshot = list(self.history)
+
+        def run_task(t: str):
+            gw = Gateway()
+            gw.cli_auth_status = parent_auth
+            result = gw.request(
+                t,
+                tier=self.effort_tier or Tier.MEDIUM,
+                history=history_snapshot,
+                cli_override=self.cli_override,
+                mode=self.mode,
+            )
+            return result, gw.last_usage
+
+        with ThreadPoolExecutor(max_workers=min(8, len(task_lines))) as executor:
+            futures = {executor.submit(run_task, t): t for t in task_lines}
+            for future in as_completed(futures):
+                t = futures[future]
+                try:
+                    result, usage = future.result()
+                except Exception as e:
+                    self.call_from_thread(self._add_message, Text(f"❌ {t[:60]}: {e}", style="red"))
+                    continue
+                tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
+                self.call_from_thread(self._add_message, Static(f"  {t[:80]}", classes="user-msg"))
+                self.call_from_thread(self._add_message, Markdown(result))
+                if tag:
+                    self.call_from_thread(self._add_message, Text(tag, style="dim"))
+                if usage:
+                    self.usage_log.append(usage)
+
+        combined = f"[SDD spec]\n{spec}\n\n[Tasks]\n" + "\n".join(f"- {t}" for t in task_lines)
+        self.history.append({"role": Role.USER, "content": f"/sdd {task}"})
+        self.history.append({"role": Role.ASSISTANT, "content": combined})
+        self._save_session()
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:

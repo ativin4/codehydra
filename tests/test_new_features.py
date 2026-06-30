@@ -593,6 +593,94 @@ class TestPR:
 
 
 # ---------------------------------------------------------------------------
+# /sdd: spec-driven development command
+# ---------------------------------------------------------------------------
+
+class TestSDD:
+    def _make_app(self, tmp_path, monkeypatch):
+        import codehydra.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = [{"role": "system", "content": "sys"}]
+        app.cli_override = None
+        app.model_override = None
+        app.effort_tier = None
+        app.mode = "yolo"
+        app.usage_log = []
+        app.session_id = "test"
+        app.sessions = MagicMock()
+        captured = []
+        app._add_message = lambda w: captured.append(w)
+        app.call_from_thread = lambda fn, *a, **kw: fn(*a, **kw)
+        app._captured = captured
+        return app
+
+    def test_sdd_no_task_shows_usage(self, tmp_path, monkeypatch):
+        app = self._make_app(tmp_path, monkeypatch)
+        app._handle_command("/sdd")
+        msgs = [str(w) for w in app._captured]
+        assert any("Usage" in m or "usage" in m for m in msgs)
+
+    def test_sdd_routes_to_worker(self, tmp_path, monkeypatch):
+        import codehydra.tui as tui_mod
+        app = self._make_app(tmp_path, monkeypatch)
+        # Verify _run_sdd is called with the task string (don't run the real worker)
+        called_with = []
+        app._run_sdd = lambda t: called_with.append(t)
+        app._handle_command("/sdd build a login page")
+        assert called_with == ["build a login page"]
+
+    def test_sdd_parses_task_lines(self, tmp_path, monkeypatch):
+        import re
+        # Verify the TASK regex used in _run_sdd works on real spec output
+        spec = (
+            "## Spec\nBuild auth.\n\n## Requirements\n- req\n\n## Tasks\n"
+            "TASK 1: Create the login form component\n"
+            "TASK 2: Implement JWT validation middleware\n"
+            "TASK 3: Write integration tests for auth flow\n"
+        )
+        tasks = re.findall(r"^TASK \d+:\s*(.+)$", spec, re.MULTILINE)
+        assert len(tasks) == 3
+        assert tasks[0] == "Create the login form component"
+        assert tasks[2] == "Write integration tests for auth flow"
+
+
+# ---------------------------------------------------------------------------
+# Status bar: tier shown in via string
+# ---------------------------------------------------------------------------
+
+class TestStatusBarTier:
+    def test_tier_shown_in_status(self, tmp_path, monkeypatch):
+        import codehydra.tui as tui_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tui_mod, "MEMORY_FILE", tmp_path / "memory.md")
+        app = tui_mod.HydraApp.__new__(tui_mod.HydraApp)
+        app.system_msg = "sys"
+        app.history = []
+        app.cli_override = None
+        app.model_override = None
+        app.effort_tier = None
+        app.mode = "yolo"
+        app._request_active = False
+        app.session_id = "test-session"
+        app.usage_log = [{"cli": "claude", "model": "anthropic/sonnet", "tier": "medium", "tokens": 100}]
+        mock_gw = MagicMock()
+        mock_gw.rate_limit_resets_in.return_value = None
+        app.gateway = mock_gw
+        status_updates = []
+        mock_status = MagicMock()
+        mock_status.update = lambda s: status_updates.append(s)
+        app.query_one = lambda sel, cls=None: mock_status
+        app._update_status()
+        assert status_updates, "update() never called"
+        status_str = status_updates[-1]
+        assert "sonnet" in status_str
+        assert "medium" in status_str
+
+
+# ---------------------------------------------------------------------------
 # Patcher: atomic write and path traversal rejection
 # ---------------------------------------------------------------------------
 
