@@ -253,9 +253,12 @@ class HydraApp(App):
         self.session_id = self.sessions.new_session_id()
         self._prompt_history = []
         self._history_index = -1
-        # Tracks whether a request worker is currently running.
+        # Tracks whether the main prompt worker is running.
         self._request_active = False
         self._cancel_event = threading.Event()
+        # Counter for background workers (parallel/sdd/compare/commit/search…).
+        # Distinct from _request_active so both can be true simultaneously.
+        self._active_workers = 0
 
     def on_unmount(self) -> None:
         self._save_session()
@@ -265,6 +268,14 @@ class HydraApp(App):
         """Signal the active request worker to abort on the next chunk."""
         self._cancel_event.set()
         self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
+
+    def _inc_workers(self) -> None:
+        self._active_workers = getattr(self, "_active_workers", 0) + 1
+        self._update_status()
+
+    def _dec_workers(self) -> None:
+        self._active_workers = max(0, getattr(self, "_active_workers", 1) - 1)
+        self._update_status()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="history")
@@ -305,17 +316,21 @@ class HydraApp(App):
 
     def _update_status(self) -> None:
         parts: list[str] = []
-        if self._request_active:
+        if getattr(self, "_request_active", False):
             parts.append("⏳ thinking… (Ctrl+C to cancel)")
-        if self.cli_override:
+        _aw = getattr(self, "_active_workers", 0)
+        if _aw > 0:
+            label = "agent" if _aw == 1 else "agents"
+            parts.append(f"⚙ {_aw} {label} working…")
+        if getattr(self, "cli_override", None):
             parts.append(f"cli:{_CLI_DISPLAY.get(self.cli_override, self.cli_override)}")
-        if self.model_override:
+        if getattr(self, "model_override", None):
             parts.append(f"model:{self.model_override}")
-        if self.effort_tier:
+        if getattr(self, "effort_tier", None):
             parts.append(f"effort:{self.effort_tier}")
-        if self.mode != Mode.YOLO:
+        if getattr(self, "mode", Mode.YOLO) != Mode.YOLO:
             parts.append(f"mode:{self.mode}")
-        if self.usage_log:
+        if getattr(self, "usage_log", None):
             last = self.usage_log[-1]
             display_cli = _CLI_DISPLAY.get(last["cli"], last["cli"])
             short_model = last["model"].split("/")[-1]
@@ -328,9 +343,13 @@ class HydraApp(App):
                 rl_parts.append(f"{_CLI_DISPLAY.get(name, name)}⏳{secs}s")
         if rl_parts:
             parts.append(f"rate-limited: {' '.join(rl_parts)}")
-        parts.append(f"session:{self.session_id}")
+        if getattr(self, "session_id", None):
+            parts.append(f"session:{self.session_id}")
         status = "  ".join(parts) if parts else ""
-        self.query_one("#status", Static).update(status)
+        try:
+            self.query_one("#status", Static).update(status)
+        except Exception:
+            pass
 
     def _build_system_msg_base(self) -> str:
         context = self.scanner.get_system_prompt_context()
@@ -1083,38 +1102,50 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_compact(self) -> None:
-        turns = [m for m in self.history if m["role"] != Role.SYSTEM]
-        if len(turns) < 6:
-            self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
-            return
-        self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
+        self.call_from_thread(self._inc_workers)
         try:
-            msg = self._do_compact()
-        except Exception as e:
-            self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
-            return
-        self.call_from_thread(self._add_message, Text(msg or "Nothing to compact.", style="green"))
+            turns = [m for m in self.history if m["role"] != Role.SYSTEM]
+            if len(turns) < 6:
+                self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
+                return
+            self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
+            try:
+                msg = self._do_compact()
+            except Exception as e:
+                self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
+                return
+            self.call_from_thread(self._add_message, Text(msg or "Nothing to compact.", style="green"))
+        finally:
+            self.call_from_thread(self._dec_workers)
 
     @work(thread=True, group="search")
     def _run_search(self, query: str) -> None:
-        self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="dim yellow"))
+        self.call_from_thread(self._inc_workers)
         try:
-            results = search(query)
-            formatted = format_results(results)
-        except Exception as e:
-            self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
-            return
-        self.call_from_thread(self._add_message, Markdown(formatted))
-        # Add as a user+assistant pair so the conversation structure stays valid.
-        # The "user" turn records what was searched; the "assistant" turn holds
-        # the results so the next prompt can reference them.
-        content = f"[Web search results for: {query}]\n{formatted}"
-        self.history.append({"role": Role.USER,      "content": f"/search {query}"})
-        self.history.append({"role": Role.ASSISTANT, "content": content})
+            self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="dim yellow"))
+            try:
+                results = search(query)
+                formatted = format_results(results)
+            except Exception as e:
+                self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
+                return
+            self.call_from_thread(self._add_message, Markdown(formatted))
+            content = f"[Web search results for: {query}]\n{formatted}"
+            self.history.append({"role": Role.USER,      "content": f"/search {query}"})
+            self.history.append({"role": Role.ASSISTANT, "content": content})
+        finally:
+            self.call_from_thread(self._dec_workers)
 
     @work(thread=True, group="parallel")
     def _run_sdd(self, task: str) -> None:
         """Spec-Driven Development: spec agent → parse tasks → parallel implementation agents."""
+        self.call_from_thread(self._inc_workers)
+        try:
+            self._run_sdd_inner(task)
+        finally:
+            self.call_from_thread(self._dec_workers)
+
+    def _run_sdd_inner(self, task: str) -> None:
         import re as _re
 
         # Phase 1 — spec generation with a high-tier model in plan mode.
@@ -1208,6 +1239,13 @@ class HydraApp(App):
 
     @work(thread=True, group="parallel")
     def _run_parallel(self, prompts: list[str]) -> None:
+        self.call_from_thread(self._inc_workers)
+        try:
+            self._run_parallel_inner(prompts)
+        finally:
+            self.call_from_thread(self._dec_workers)
+
+    def _run_parallel_inner(self, prompts: list[str]) -> None:
         parent_auth = self.gateway.cli_auth_status
         history_snapshot = list(self.history)
 
@@ -1248,6 +1286,13 @@ class HydraApp(App):
 
     @work(thread=True, group="compare")
     def _run_compare(self, prompt: str, cli_names: list[str]) -> None:
+        self.call_from_thread(self._inc_workers)
+        try:
+            self._run_compare_inner(prompt, cli_names)
+        finally:
+            self.call_from_thread(self._dec_workers)
+
+    def _run_compare_inner(self, prompt: str, cli_names: list[str]) -> None:
         """Sends the same prompt to every active CLI in parallel and renders
         each response as a labelled block so the user can compare answers."""
         parent_auth = self.gateway.cli_auth_status
@@ -1339,6 +1384,13 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="git")
     def _run_commit(self, message_override: str = "") -> None:
+        self.call_from_thread(self._inc_workers)
+        try:
+            self._run_commit_inner(message_override)
+        finally:
+            self.call_from_thread(self._dec_workers)
+
+    def _run_commit_inner(self, message_override: str = "") -> None:
         check = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, text=True)
         if check.returncode != 0:
             self.call_from_thread(self._add_message, Text("Not a git repository.", style="red"))
@@ -1386,6 +1438,13 @@ class HydraApp(App):
 
     @work(thread=True, exclusive=True, group="git")
     def _run_pr(self, title_override: str = "") -> None:
+        self.call_from_thread(self._inc_workers)
+        try:
+            self._run_pr_inner(title_override)
+        finally:
+            self.call_from_thread(self._dec_workers)
+
+    def _run_pr_inner(self, title_override: str = "") -> None:
         if not shutil.which("gh"):
             self.call_from_thread(self._add_message, Text("'gh' not found. Install: https://cli.github.com/", style="red"))
             return
