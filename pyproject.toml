@@ -33,7 +33,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/ativin4/codehydra"
 Repository = "https://github.com/ativin4/codehydra"
-Issues = "https://github.com/ativin4/codehydra.git/issues"
+Issues = "https://github.com/ativin4/codehydra/issues"
 
 [project.scripts]
 codehydra = "codehydra.cli:app"
