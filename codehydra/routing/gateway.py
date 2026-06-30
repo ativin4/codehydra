@@ -279,7 +279,7 @@ class Gateway:
             except Exception:
                 pass
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
         try:
             with open(tmp, "w") as f:
                 json.dump(data, f, indent=2)
