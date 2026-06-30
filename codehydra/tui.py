@@ -79,62 +79,60 @@ SLASH_COMMANDS = [
 HELP_TEXT = """\
 ## CodeHydra Commands
 
-**Routing**
-| Command | Description |
-|---|---|
-| `/effort low\\|medium\\|high` | Set effort tier — affects model quality |
-| `/cli auto\\|claude\\|agy\\|codex\\|ollama` | Pin backend CLI for this session |
-| `/model <name\\|auto>` | Pin exact model name |
-| `/mode plan\\|yolo` | `plan`=read-only, `yolo`=auto-approve edits |
+### Routing
+- `/effort low|medium|high` — set effort tier (model quality)
+- `/cli auto|claude|agy|codex|ollama` — pin backend CLI
+- `/model <name|auto>` — pin exact model name
+- `/mode plan|yolo` — `plan`=read-only, `yolo`=auto-approve edits
 
-**Auth**
-| `/login <cli>` | Launch auth flow, or show setup info for ollama |
-| `/doctor` | Check CLI availability, auth, MCP server, and project health |
+### Auth
+- `/login <cli>` — launch auth flow (or setup info for ollama)
+- `/doctor` — check CLI auth, MCP server, and project health
 
-**Context**
-| `/compact` | Summarise old history, keep 2 recent turns |
-| `/memory` | Show project memory |
-| `/remember <fact>` | Save a fact (persists across sessions) |
-| `/forget <pattern>` | Remove memory lines matching pattern |
-| `/search <query>` | DuckDuckGo search — results injected as context |
+### Context
+- `/compact` — summarise old history, keep 2 recent turns
+- `/memory` — show project memory
+- `/remember <fact>` — save a fact (persists across sessions)
+- `/forget <pattern>` — remove memory lines matching pattern
+- `/search <query>` — DuckDuckGo search, results injected as context
 
-**Inline expansions (in any prompt)**
-| `@path/to/file` | Inject file content |
-| `@https://url` | Fetch URL and inject content |
-| `@image.png` | Attach image (agy: native multimodal; ollama: vision API) |
-| `@doc.pdf` | Attach PDF (agy: native; others: pdftotext) |
+### Inline expansions (in any prompt)
+- `@path/to/file` — inject file content
+- `@https://url` — fetch URL and inject content
+- `@image.png` — attach image (agy: native multimodal; ollama: vision)
+- `@doc.pdf` — attach PDF (agy: native; others: pdftotext)
 
-**Skills**
-| `/skills` | List skills in `.codehydra/skills/` |
-| `/skill <name> [prompt]` | Run a skill |
+### Skills
+- `/skills` — list skills in `.codehydra/skills/`
+- `/skill <name> [prompt]` — run a skill
 
-**Multi-CLI**
-| `/compare <prompt>` | Same prompt to all active CLIs — compare results |
-| `/parallel "t1" "t2"` | Run tasks concurrently, each in its own CLI process |
+### Multi-CLI
+- `/compare <prompt>` — same prompt to all active CLIs, compare results
+- `/parallel "t1" "t2"` — run tasks concurrently, each in its own CLI
 
-**Session**
-| `/sessions` | List saved sessions |
-| `/resume [id]` | Resume a session (defaults to most recent) |
-| `/cost` | Per-turn CLI/model/tier and token usage |
-| `/clear` | Reset conversation history |
+### Session
+- `/sessions` — list saved sessions
+- `/resume [id]` — resume a session (defaults to most recent)
+- `/cost` — per-turn CLI/model/tier and token usage
+- `/clear` — reset conversation history
 
-**Spec-Driven Development (SDD)**
-| `/sdd <task>` | Phase 1: spec agent creates structured plan. Phase 2: parallel agents implement each task. |
-| `/loop [N] <prompt>` | Repeat prompt N times (omit N for infinite). Ctrl+C stops the loop. |
+### Spec-Driven Development
+- `/sdd <task>` — phase 1: spec via high-tier agent; phase 2: parallel implementation
+- `/loop [N] <prompt>` — repeat prompt N times (omit N = infinite; Ctrl+C stops)
 
-**Background Tasks**
-| `/tasks` | List background tasks spawned by agents (via `run_in_background` MCP tool) |
+### Background Tasks
+- `/tasks` — list background tasks spawned by agents via MCP
 
-**Git**
-| `/commit [msg]` | Stage all + AI commit message (or pass your own) |
-| `/pr [title]` | Generate PR description, push branch, create PR via `gh` |
+### Git
+- `/commit [msg]` — stage all + AI commit message (or pass your own)
+- `/pr [title]` — generate PR description, push branch, create PR via `gh`
 
-**Input**
-| `Tab` | Autocomplete `@path` file reference |
-| `Ctrl+Enter` | Insert newline (multi-line prompt) |
-| `Ctrl+E` | Open prompt in `$EDITOR` (Vim/Nano/VSCode etc.) |
-| `↑` / `↓` | Navigate prompt history |
-| `Ctrl+C` | Cancel active request / clear input / quit |
+### Input
+- `Tab` — autocomplete `@path` file reference
+- `Ctrl+Enter` — insert newline (multi-line prompt)
+- `Ctrl+E` — open prompt in `$EDITOR`
+- `↑` / `↓` — navigate prompt history
+- `Ctrl+C` — cancel active request / clear input / quit
 """
 
 
