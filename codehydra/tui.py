@@ -1202,11 +1202,15 @@ class HydraApp(App):
         if not BG_DIR.exists():
             self._add_message(Text("No background tasks yet.", style="dim"))
             return
-        task_dirs = sorted(BG_DIR.iterdir())
+        task_dirs = sorted(d for d in BG_DIR.iterdir() if d.is_dir())
         if not task_dirs:
             self._add_message(Text("No background tasks yet.", style="dim"))
             return
-        rows = []
+        table = Table(title="Background Tasks", show_lines=False)
+        table.add_column("ID")
+        table.add_column("Status")
+        table.add_column("Command")
+        table.add_column("Last output")
         for task_dir in task_dirs:
             meta_path = task_dir / "meta.json"
             if not meta_path.exists():
@@ -1219,19 +1223,14 @@ class HydraApp(App):
             tail = ""
             if log_path.exists():
                 lines = log_path.read_text().splitlines()
-                tail = lines[-1][:80] if lines else ""
+                tail = lines[-1][:60] if lines else ""
             try:
                 os.kill(meta["pid"], 0)
-                status = "running"
-                style = "green"
+                status = Text("running", style="green")
             except OSError:
-                status = "done"
-                style = "dim"
-            rows.append(Text(
-                f"[{task_dir.name}] {status}  {meta['command'][:50]}  {tail}",
-                style=style,
-            ))
-        self._add_message(Group(*rows) if rows else Text("No background tasks yet.", style="dim"))
+                status = Text("done", style="dim")
+            table.add_row(task_dir.name, status, meta["command"][:50], tail)
+        self._add_message(table)
 
     @work(thread=True, exclusive=True, group="git")
     def _run_commit(self, message_override: str = "") -> None:
