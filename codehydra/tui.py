@@ -235,7 +235,7 @@ class HydraApp(App):
 
     BINDINGS = []
 
-    def __init__(self):
+    def __init__(self, resume: str | None = None):
         super().__init__()
         self.gateway = Gateway()
         self.scanner = Scanner()
@@ -252,6 +252,7 @@ class HydraApp(App):
         self.mode = Mode.YOLO
         self.usage_log = []
         self.session_id = self.sessions.new_session_id()
+        self._resume_target = resume  # resolved in on_mount after widgets exist
         self._prompt_history = []
         self._history_index = -1
         # Tracks whether the main prompt worker is running.
@@ -336,6 +337,25 @@ class HydraApp(App):
 
         self._update_status()
         self.query_one("#input-area", TextArea).focus()
+
+        if self._resume_target is not None:
+            target = self._resume_target or self.sessions.latest_session_id(exclude=self.session_id)
+            data = self.sessions.load(target) if target else None
+            if not data:
+                self._add_message(Text(f"No session found: {target or '(none saved)'}", style="red"))
+            else:
+                self.session_id = target
+                self.history = data.get("history", self.history)
+                self.effort_tier = data.get("effort_tier")
+                self.cli_override = data.get("cli_override")
+                self.model_override = data.get("model_override")
+                self.mode = data.get("mode", Mode.YOLO)
+                self.usage_log = data.get("usage_log", [])
+                self.system_msg = self._build_system_msg_base()
+                self._refresh_system_msg()
+                self._render_history()
+                self._add_message(Text(f"Resumed session {self.session_id}", style="yellow"))
+                self._update_status()
 
     # -- helpers -----------------------------------------------------
 
