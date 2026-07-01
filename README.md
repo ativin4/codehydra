@@ -35,13 +35,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 git clone https://github.com/ativin4/codehydra.git
 cd codehydra
-uv sync
+pipx install --editable .   # installs `codehydra` on PATH (same dir as claude / agy)
 ```
+
+> **No pipx?** `brew install pipx` (macOS) or `pip install pipx`. Editable install means code changes take effect immediately — no reinstall needed.
 
 ### 3. Usage
 ```bash
-# Start the interactive TUI
-uv run python3 main.py
+codehydra                   # fresh session
+codehydra --resume          # resume most recent session
+codehydra --resume <id>     # resume a specific session by ID
 ```
 
 ### 4. Configure Self-Healing
@@ -62,7 +65,7 @@ command = "pytest" # or "npm run build", "go build", etc.
 | `/login <claude\|agy\|codex\|ollama>` | Launch auth flow (or show setup/model info for Ollama) |
 | `/parallel "task 1" "task 2" ...` | Run multiple prompts concurrently (each in its own CLI process), results shown as they complete |
 | `/sessions` | List saved sessions |
-| `/resume [id]` | Resume a session (defaults to the most recent other than current) |
+| `/resume [id]` | Resume a session in-TUI (defaults to most recent); also available as `codehydra --resume [id]` at launch |
 | `/cost` | Show per-turn CLI/model/tier and token usage for this session |
 | `/clear` | Reset conversation history |
 | `/exit` | Terminate session |
