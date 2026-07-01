@@ -27,6 +27,7 @@ dependencies = [
     "pathspec>=1.1.1",
     "rich>=15.0.0",
     "textual>=8.2.7",
+    "textual-serve>=1.1.3",
     "typer>=0.26.7",
 ]
 

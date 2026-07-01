@@ -351,6 +351,99 @@ class TestDoctor:
 
 
 # ---------------------------------------------------------------------------
+# Gateway quota fallback
+# ---------------------------------------------------------------------------
+
+class TestGatewayQuotaFallback:
+    def _gateway(self, monkeypatch):
+        import codehydra.routing.gateway as gw_mod
+        from codehydra.routing.constants import CLI, Tier
+
+        monkeypatch.setattr(gw_mod, "_SHARED_RATE_LIMITED", {})
+        gw = gw_mod.Gateway.__new__(gw_mod.Gateway)
+        gw.classifier = MagicMock()
+        gw.priority = None
+        gw.cli_auth_status = {
+            CLI.CLAUDE: True,
+            CLI.CODEX: True,
+            CLI.AGY: True,
+            CLI.OLLAMA: False,
+        }
+        gw.model_map = {
+            Tier.LOW: ["anthropic/haiku", "codex/default", "agy/agy-2.5-flash"],
+            Tier.MEDIUM: ["anthropic/sonnet", "codex/default", "agy/agy-2.5-pro"],
+            Tier.HIGH: ["anthropic/opus", "codex/default", "agy/agy-2.5-pro"],
+        }
+        gw.cli_default_models = {cli: dict(tiers) for cli, tiers in gw_mod.Gateway.CLI_DEFAULT_MODELS.items()}
+        return gw
+
+    def test_cli_override_falls_back_on_rate_limit(self, monkeypatch):
+        from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import RateLimitError
+
+        gw = self._gateway(monkeypatch)
+        used = []
+
+        def fake_run_cli(cli, *args, **kwargs):
+            used.append(cli)
+            if cli == CLI.CLAUDE:
+                raise RateLimitError("You've hit your session limit")
+            return "HYDRA_OK"
+
+        gw._run_cli = fake_run_cli
+        result = gw.request("reply ok", tier="low", cli_override="claude")
+
+        assert result == "HYDRA_OK"
+        assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
+
+    def test_cli_override_falls_back_on_rate_limit_text_exception(self, monkeypatch):
+        from codehydra.routing.constants import CLI
+
+        gw = self._gateway(monkeypatch)
+        used = []
+
+        def fake_run_cli(cli, *args, **kwargs):
+            used.append(cli)
+            if cli == CLI.CLAUDE:
+                raise Exception("claude CLI failed: usage limit reached")
+            return "HYDRA_OK"
+
+        gw._run_cli = fake_run_cli
+        result = gw.request("reply ok", tier="low", cli_override="claude")
+
+        assert result == "HYDRA_OK"
+        assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
+
+    def test_cli_override_stream_falls_back_on_rate_limit(self, monkeypatch):
+        from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import RateLimitError
+
+        gw = self._gateway(monkeypatch)
+        used = []
+
+        def fake_stream(cli, *args, **kwargs):
+            used.append(cli)
+            if cli == CLI.CLAUDE:
+                raise RateLimitError("session limit")
+            yield "STREAM_OK"
+
+        gw._run_cli_stream = fake_stream
+        chunks = list(gw.request_stream("reply ok", tier="low", cli_override="claude"))
+
+        assert "".join(chunks) == "STREAM_OK"
+        assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
+
+    def test_quota_stdout_is_not_treated_as_success(self):
+        from codehydra.routing.gateway import Gateway, RateLimitError
+
+        with pytest.raises(RateLimitError):
+            Gateway._raise_if_rate_limited_output(
+                "claude",
+                "You've hit your session limit · resets 10:50am (Asia/Calcutta)",
+            )
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: real cloud CLI (claude)
 # ---------------------------------------------------------------------------
 

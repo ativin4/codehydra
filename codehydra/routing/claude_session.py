@@ -38,6 +38,7 @@ class ClaudeSession:
         self.model = model
         self.mode_flags = mode_flags
         self.system_prompt = system_prompt
+        self.last_result_text = ""
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
@@ -77,6 +78,7 @@ class ClaudeSession:
         msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}}
         self._proc.stdin.write(json.dumps(msg) + "\n")
         self._proc.stdin.flush()
+        self.last_result_text = ""
 
         thinking_open = False
         while True:
@@ -108,6 +110,9 @@ class ClaudeSession:
                         yield THINKING_END, None
                     yield delta["text"], None
             elif data.get("type") == "result":
+                result_text = data.get("result")
+                if isinstance(result_text, str):
+                    self.last_result_text = result_text.strip()
                 usage = data.get("usage") or {}
                 total = sum(v for v in usage.values() if isinstance(v, int))
                 yield None, total or None

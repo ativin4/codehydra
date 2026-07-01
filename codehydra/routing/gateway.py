@@ -30,6 +30,10 @@ _SHARED_RATE_LIMITED: Dict[str, float] = {}
 _SHARED_RATE_LOCK = threading.Lock()
 
 
+class RateLimitError(Exception):
+    """Raised when a backend reports quota/rate-limit exhaustion."""
+
+
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
     # aliases ("sonnet"/"haiku"/"opus", "default") that auto-resolve to the
@@ -452,7 +456,8 @@ class Gateway:
     # Patterns that indicate a subscription rate-limit (not a bug/auth failure).
     _RATE_LIMIT_RE = re.compile(
         r"rate.?limit|too many requests|quota exceeded|429|overloaded|"
-        r"capacity|try again|please wait|usage limit",
+        r"capacity|try again|please wait|usage limit|session limit|"
+        r"hit your .*limit|limit resets?|resets \d",
         re.IGNORECASE,
     )
     # Default cooldown when no retry-after header is available.
@@ -461,6 +466,15 @@ class Gateway:
     @classmethod
     def _strip_ansi(cls, text: str) -> str:
         return cls._ANSI_RE.sub("", text)
+
+    @classmethod
+    def _is_rate_limit_text(cls, text: str) -> bool:
+        return bool(text and cls._RATE_LIMIT_RE.search(cls._strip_ansi(text)))
+
+    @classmethod
+    def _raise_if_rate_limited_output(cls, cli_name: str, text: str) -> None:
+        if cls._is_rate_limit_text(text):
+            raise RateLimitError(f"{cli_name} CLI rate limited: {text.strip()}")
 
     def _mark_rate_limited(self, cli_name: str, seconds: int = _RATE_LIMIT_COOLDOWN) -> None:
         with _SHARED_RATE_LOCK:
@@ -510,7 +524,7 @@ class Gateway:
         cmd, env = self._build_cmd(cli_name, messages, model, mode, media_files=media_files)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                                    timeout=self._CLI_TIMEOUT)
+                                    stdin=subprocess.DEVNULL, timeout=self._CLI_TIMEOUT)
 
             output = result.stdout.strip()
             err_output = result.stderr.strip()
@@ -523,10 +537,13 @@ class Gateway:
             final_output = "\n".join(cleaned_lines).strip()
             if not final_output:
                 raise Exception(f"{cli_name} CLI returned no usable output. STDOUT: {output} STDERR: {err_output}")
+            self._raise_if_rate_limited_output(cli_name, final_output)
             self._record_usage(cli_name, model, err_output, tier)
             return final_output
         except subprocess.TimeoutExpired:
             raise Exception(f"{cli_name} CLI timed out ({self._CLI_TIMEOUT}s) — likely waiting for auth. Run /login {cli_name}.")
+        except RateLimitError:
+            raise
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
@@ -607,7 +624,10 @@ class Gateway:
 
         self._claude_history_len = complete_pairs + 1
         if not yielded_any:
-            raise Exception("claude CLI returned no usable output.")
+            result_text = getattr(self._claude_session, "last_result_text", "")
+            self._raise_if_rate_limited_output(CLI.CLAUDE, result_text)
+            detail = f": {result_text}" if result_text else "."
+            raise Exception(f"claude CLI returned no usable output{detail}")
         self._record_usage(CLI.CLAUDE, model, "", tier, tokens=tokens)
 
     def refresh_auth(self) -> None:
@@ -627,6 +647,11 @@ class Gateway:
             raise Exception(f"Unknown CLI override: {cli_override}")
         model_name = model_override or self.cli_default_models[cli_override][tier]
         return cli_override, f"{cli_override}/{model_name}"
+
+    def _fallback_models_after_override(self, failed_cli: str, tier: str) -> List[str]:
+        """Auto-mode candidates excluding the backend that just hit quota."""
+        models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
+        return [model for model in models if self._cli_for_model(model) != failed_cli]
 
     def close(self, stop_mcp_server: bool = False) -> None:
         """Releases persistent CLI sessions. Call on app exit.
@@ -706,6 +731,7 @@ class Gateway:
                                     chunk = line
 
                                 if chunk:
+                                    self._raise_if_rate_limited_output(cli_name, chunk)
                                     yielded_any = True
                                     last_output_time = time.time()
                                     yield chunk
@@ -732,6 +758,7 @@ class Gateway:
                         else:
                             chunk = line
                         if chunk:
+                            self._raise_if_rate_limited_output(cli_name, chunk)
                             yielded_any = True
                             yield chunk
 
@@ -750,6 +777,8 @@ class Gateway:
                 raise Exception(f"{cli_name} CLI returned no usable output.")
 
             self._record_usage(cli_name, model, "", tier, tokens=tokens)
+        except RateLimitError:
+            raise
         except Exception as e:
             raise Exception(f"{cli_name} CLI execution error: {e}")
 
@@ -853,11 +882,11 @@ class Gateway:
         mode: str = "yolo",
         media_files: List[Path] = [],
     ) -> str:
-        """Routes request to appropriate CLI model with fallback logic.
+        """Routes request to an appropriate CLI model with fallback logic.
 
-        If cli_override is set (and not "auto"), that CLI is used directly
-        with no fallback. model_override picks the exact model name for it,
-        defaulting to CLI_DEFAULT_MODELS[cli_override][tier].
+        If cli_override is set (and not "auto"), that CLI is tried first.
+        Non-quota failures stay pinned and surface directly; quota/rate-limit
+        failures fall through to the normal auto-mode candidates.
         """
         if tier is None:
             tier = self.classifier.evaluate(prompt)
@@ -867,19 +896,35 @@ class Gateway:
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
             cli_name, model = resolved
-            if cli_name == "ollama":
-                return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
-            return self._run_cli(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
+            try:
+                if cli_name == "ollama":
+                    return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
+                return self._run_cli(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
+            except RateLimitError as e:
+                self._mark_rate_limited(cli_name)
+                last_exception = e
+                models = self._fallback_models_after_override(cli_name, tier)
+            except Exception as e:
+                if self._is_rate_limit_text(str(e)):
+                    self._mark_rate_limited(cli_name)
+                    last_exception = e
+                    models = self._fallback_models_after_override(cli_name, tier)
+                else:
+                    raise
+        else:
+            models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
+            last_exception = None
 
-        models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
-
-        last_exception = None
         for model in models:
             try:
                 cli = self._cli_for_model(model)
                 if cli == "ollama":
                     return "".join(self._run_oss_stream(model, messages, tier=tier, media_files=media_files))
                 return self._run_cli(cli, messages, model, tier=tier, mode=mode, media_files=media_files)
+            except RateLimitError as e:
+                self._mark_rate_limited(self._cli_for_model(model))
+                last_exception = e
+                continue
             except Exception as e:
                 if self._RATE_LIMIT_RE.search(str(e)):
                     self._mark_rate_limited(self._cli_for_model(model))
@@ -900,8 +945,9 @@ class Gateway:
     ) -> Generator[str, None, None]:
         """Like request(), but yields output incrementally as the CLI produces it.
 
-        Fallback to the next model only happens if the chosen CLI produces no
-        output at all; once any chunk is yielded, that model is committed.
+        Fallback to the next model only happens if the chosen CLI fails before
+        yielding a real chunk; once any non-quota chunk is yielded, that model
+        is committed.
         """
         if tier is None:
             tier = self.classifier.evaluate(prompt)
@@ -911,15 +957,35 @@ class Gateway:
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
             cli_name, model = resolved
-            if cli_name == "ollama":
-                yield from self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
+            try:
+                gen = (
+                    self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
+                    if cli_name == "ollama"
+                    else self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
+                )
+                first_chunk = next(gen)
+            except StopIteration:
+                models = self._fallback_models_after_override(cli_name, tier)
+                last_exception = None
+            except RateLimitError as e:
+                self._mark_rate_limited(cli_name)
+                models = self._fallback_models_after_override(cli_name, tier)
+                last_exception = e
+            except Exception as e:
+                if self._is_rate_limit_text(str(e)):
+                    self._mark_rate_limited(cli_name)
+                    models = self._fallback_models_after_override(cli_name, tier)
+                    last_exception = e
+                else:
+                    raise
             else:
-                yield from self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
-            return
+                yield first_chunk
+                yield from gen
+                return
+        else:
+            models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
+            last_exception = None
 
-        models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
-
-        last_exception = None
         for model in models:
             try:
                 cli = self._cli_for_model(model)
@@ -930,6 +996,10 @@ class Gateway:
                 )
                 first_chunk = next(gen)
             except StopIteration:
+                continue
+            except RateLimitError as e:
+                self._mark_rate_limited(self._cli_for_model(model))
+                last_exception = e
                 continue
             except Exception as e:
                 if self._RATE_LIMIT_RE.search(str(e)):

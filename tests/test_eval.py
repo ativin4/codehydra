@@ -419,6 +419,79 @@ class TestTUIHeadless:
             texts = _static_texts(app)
             assert any("at least 2" in t.lower() for t in texts), texts
 
+    @pytest.mark.parametrize(
+        "command,expected_cmd,expected_cli",
+        [
+            ("/login claude", ["claude", "auth", "login"], "claude"),
+            ("/login codex", ["codex", "login"], "codex"),
+            ("/login agy", ["agy"], "agy"),
+            ("/login gemini", ["agy"], "agy"),
+            ("/login google", ["agy"], "agy"),
+        ],
+    )
+    async def test_login_commands_launch_cli_auth(self, tmp_cwd, monkeypatch, command, expected_cmd, expected_cli):
+        import contextlib
+        import codehydra.tui as tui_mod
+
+        app = _make_tui_app(tmp_cwd)
+        calls = []
+
+        def fake_run(cmd, check=False):
+            calls.append((list(cmd), check))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(tui_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(app, "suspend", lambda: contextlib.nullcontext())
+
+        async with app.run_test(headless=True, size=(120, 40)) as pilot:
+            await _type_command(pilot, command)
+            texts = _static_texts(app)
+
+        assert calls == [(expected_cmd, False)]
+        app.gateway.refresh_auth.assert_called()
+        assert any(f"refreshed credentials for '{expected_cli}'" in t.lower() for t in texts), texts
+
+    async def test_login_ollama_lists_models_without_subprocess(self, tmp_cwd, monkeypatch):
+        import codehydra.tui as tui_mod
+
+        app = _make_tui_app(tmp_cwd)
+        run_mock = MagicMock()
+        monkeypatch.setattr(tui_mod.subprocess, "run", run_mock)
+        monkeypatch.setattr(tui_mod.OllamaProvider, "list_models", lambda: ["llama3.2"])
+
+        async with app.run_test(headless=True, size=(120, 40)) as pilot:
+            await _type_command(pilot, "/login ollama")
+            texts = _static_texts(app)
+
+        run_mock.assert_not_called()
+        app.gateway.refresh_auth.assert_called()
+        assert any("ollama ready" in t.lower() for t in texts), texts
+        assert any("llama3.2" in t for t in texts), texts
+
+    async def test_login_ollama_unreachable_message(self, tmp_cwd, monkeypatch):
+        import codehydra.tui as tui_mod
+
+        app = _make_tui_app(tmp_cwd)
+        monkeypatch.setattr(tui_mod.OllamaProvider, "list_models", lambda: [])
+
+        async with app.run_test(headless=True, size=(120, 40)) as pilot:
+            await _type_command(pilot, "/login ollama")
+            texts = _static_texts(app)
+
+        app.gateway.refresh_auth.assert_called()
+        assert any("ollama not reachable" in t.lower() for t in texts), texts
+
+    async def test_login_usage_and_unknown_errors(self, tmp_cwd):
+        app = _make_tui_app(tmp_cwd)
+
+        async with app.run_test(headless=True, size=(120, 40)) as pilot:
+            await _type_command(pilot, "/login")
+            await _type_command(pilot, "/login nope")
+            texts = _static_texts(app)
+
+        assert any("usage: /login" in t.lower() for t in texts), texts
+        assert any("unknown cli: nope" in t.lower() for t in texts), texts
+
     async def test_status_bar_shows_session_id(self, tmp_cwd):
         from textual.widgets import Static
 

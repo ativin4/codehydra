@@ -176,6 +176,8 @@ class PromptTextArea(TextArea):
             event.stop()
             self.app._open_in_editor()
         elif event.key == "ctrl+c":
+            # Textual runs the tty in raw mode (ISIG off), so Ctrl+C arrives here
+            # as a key event, not an OS SIGINT — this is the one live path.
             event.prevent_default()
             event.stop()
             if self.app._request_active and not self.app._cancel_event.is_set():
@@ -184,7 +186,7 @@ class PromptTextArea(TextArea):
             elif self.text:
                 self.text = ""
             else:
-                self.app.exit()
+                self.app._ctrl_c_idle()
 
 
 class HydraApp(App):
@@ -259,11 +261,10 @@ class HydraApp(App):
         # Counter for background workers (parallel/sdd/compare/commit/search…).
         # Distinct from _request_active so both can be true simultaneously.
         self._active_workers = 0
+        # Armed by the first Ctrl+C while workers run; a second one force-quits.
+        self._quit_armed = False
 
     def on_unmount(self) -> None:
-        import signal as _signal
-        prev = getattr(self, "_prev_sigint", _signal.SIG_DFL)
-        _signal.signal(_signal.SIGINT, prev)
         self._save_session()
         self.gateway.close(stop_mcp_server=True)
 
@@ -271,7 +272,25 @@ class HydraApp(App):
         if self._cancel_event.is_set():
             return
         self._cancel_event.set()
-        self._cancel_request_ui()
+        self._loop_stop.set()
+        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
+
+    def _ctrl_c_idle(self) -> None:
+        """Ctrl+C with no active request and an empty input box: quit, but guard
+        against killing background workers with an accidental single press."""
+        if self._active_workers > 0:
+            if self._quit_armed:
+                self.exit()
+            else:
+                self._quit_armed = True
+                n = self._active_workers
+                label = "worker" if n == 1 else "workers"
+                self._add_message(Text(
+                    f"⚠ {n} background {label} still running — press Ctrl+C again to force quit.",
+                    style="yellow",
+                ))
+        else:
+            self.exit()
 
     def _inc_workers(self) -> None:
         self._active_workers = getattr(self, "_active_workers", 0) + 1
@@ -279,6 +298,8 @@ class HydraApp(App):
 
     def _dec_workers(self) -> None:
         self._active_workers = max(0, getattr(self, "_active_workers", 1) - 1)
+        if self._active_workers == 0:
+            self._quit_armed = False
         self._update_status()
 
     def compose(self) -> ComposeResult:
@@ -288,29 +309,7 @@ class HydraApp(App):
         text_area.text = ""
         yield text_area
 
-    def _handle_sigint(self, signum, frame) -> None:
-        import asyncio as _asyncio
-        if getattr(self, "_request_active", False) and not self._cancel_event.is_set():
-            self._cancel_event.set()
-            self._loop_stop.set()
-            try:
-                loop = _asyncio.get_event_loop()
-                loop.call_soon_threadsafe(self._cancel_request_ui)
-            except Exception:
-                pass
-        elif getattr(self, "_active_workers", 0) == 0:
-            try:
-                loop = _asyncio.get_event_loop()
-                loop.call_soon_threadsafe(self.exit)
-            except Exception:
-                raise KeyboardInterrupt
-
-    def _cancel_request_ui(self) -> None:
-        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
-
     def on_mount(self) -> None:
-        import signal as _signal
-        self._prev_sigint = _signal.signal(_signal.SIGINT, self._handle_sigint)
         self._history_scroll = self.query_one("#history", VerticalScroll)
         auth_status = self.gateway.cli_auth_status
         ready = [cli for cli, ok in auth_status.items() if ok]
