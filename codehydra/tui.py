@@ -129,7 +129,7 @@ HELP_TEXT = """\
 
 ### Input
 - `Tab` — autocomplete `@path` file reference
-- `Ctrl+Enter` — insert newline (multi-line prompt)
+- `Ctrl+Enter` / `Shift+Enter` — insert newline (multi-line prompt)
 - `Ctrl+E` — open prompt in `$EDITOR`
 - `↑` / `↓` — navigate prompt history
 - `Ctrl+C` — cancel active request / clear input / quit
@@ -143,7 +143,7 @@ def _skill_names() -> list[str]:
 
 
 class PromptTextArea(TextArea):
-    """Prompt input where Enter submits and Ctrl+Enter adds a newline."""
+    """Prompt input where Enter submits and Ctrl+Enter / Shift+Enter adds a newline."""
 
     def on_key(self, event) -> None:
         if event.key == "up":
@@ -163,7 +163,7 @@ class PromptTextArea(TextArea):
             event.prevent_default()
             event.stop()
             self.app.action_submit_input()
-        elif event.key == "ctrl+enter":
+        elif event.key in ("ctrl+enter", "shift+enter"):
             event.prevent_default()
             event.stop()
             self.insert("\n")
