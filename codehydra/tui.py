@@ -193,43 +193,100 @@ class HydraApp(App):
     """Claude Code-style TUI: scrollable history with a pinned input box."""
 
     CSS = """
+    /* ── layout ─────────────────────────────────────────────────── */
     #history {
         height: 1fr;
         padding: 0 2;
     }
+
+    /* ── status bar ─────────────────────────────────────────────── */
     #status {
         height: 1;
-        background: $boost;
-        color: $text-muted;
+        background: #1a1a2e;
+        color: #6272a4;
         padding: 0 2;
     }
+
+    /* ── input box ──────────────────────────────────────────────── */
     #input-area {
         height: auto;
         max-height: 8;
         padding: 0 1;
-        border: solid $accent;
-        margin: 0 1;
+        border: tall #44475a;
+        margin: 0 1 1 1;
+        background: #1e1e2e;
     }
+    #input-area:focus {
+        border: tall #6272a4;
+    }
+
+    /* ── user message bubble ────────────────────────────────────── */
     .user-msg {
-        color: $accent;
-        margin-top: 1;
-    }
-    .thinking-active {
-        color: $text-muted;
-        text-style: italic;
-        padding-left: 2;
-        border-left: solid $accent;
+        color: #cdd6f4;
+        background: #2a2a3e;
+        padding: 0 2;
         margin-top: 1;
         margin-bottom: 0;
     }
-    .thinking-done {
-        color: $text-muted;
-        padding-left: 2;
-        margin-bottom: 0;
-    }
+
+    /* ── assistant response ─────────────────────────────────────── */
     .response-turn {
         margin-top: 0;
         margin-bottom: 1;
+        padding: 0 1;
+    }
+
+    /* ── thinking indicator ─────────────────────────────────────── */
+    .thinking-active {
+        color: #6272a4;
+        text-style: italic;
+        padding-left: 2;
+        border-left: solid #44475a;
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+    .thinking-done {
+        color: #44475a;
+        padding-left: 2;
+        margin-bottom: 0;
+    }
+
+    /* ── Markdown link/code colours ─────────────────────────────── */
+    Markdown {
+        color: #cdd6f4;
+        background: transparent;
+        margin: 0;
+        padding: 0 1;
+    }
+    MarkdownH1 {
+        color: #cba6f7;
+        text-style: bold;
+    }
+    MarkdownH2 {
+        color: #89b4fa;
+        text-style: bold;
+    }
+    MarkdownH3 {
+        color: #89dceb;
+        text-style: bold;
+    }
+    MarkdownBullet {
+        color: #6272a4;
+    }
+    MarkdownCode {
+        background: #313244;
+        color: #a6e3a1;
+    }
+    MarkdownFence {
+        background: #181825;
+        color: #a6e3a1;
+        padding: 1 2;
+        margin: 1 0;
+    }
+    MarkdownBlockQuote {
+        color: #6272a4;
+        border-left: solid #44475a;
+        padding-left: 2;
     }
     """
 
@@ -267,6 +324,10 @@ class HydraApp(App):
 
     def on_unmount(self) -> None:
         self._save_session()
+        # Print session ID to the terminal after the TUI exits so the user can
+        # resume with: codehydra --resume <id>
+        print(f"\nSession saved: {self.session_id}")
+        print(f"Resume with:   codehydra --resume {self.session_id}")
         self.gateway.close(stop_mcp_server=True)
 
     def _cancel_request(self) -> None:
@@ -274,7 +335,7 @@ class HydraApp(App):
             return
         self._cancel_event.set()
         self._loop_stop.set()
-        self._add_message(Text("⏹ Cancelling…", style="dim yellow"))
+        self._add_message(Text("⏹ Cancelling…", style="#44475a"))
 
     def _ctrl_c_idle(self) -> None:
         """Ctrl+C with no active request and an empty input box: quit, but guard
@@ -288,7 +349,7 @@ class HydraApp(App):
                 label = "worker" if n == 1 else "workers"
                 self._add_message(Text(
                     f"⚠ {n} background {label} still running — press Ctrl+C again to force quit.",
-                    style="yellow",
+                    style="#6272a4",
                 ))
         else:
             self.exit()
@@ -354,7 +415,7 @@ class HydraApp(App):
                 self.system_msg = self._build_system_msg_base()
                 self._refresh_system_msg()
                 self._render_history()
-                self._add_message(Text(f"Resumed session {self.session_id}", style="yellow"))
+                self._add_message(Text(f"Resumed session {self.session_id}", style="#6272a4"))
                 self._update_status()
 
     # -- helpers -----------------------------------------------------
@@ -477,7 +538,7 @@ class HydraApp(App):
                 ]
             else:
                 lines = [
-                    Text("Ollama not reachable.", style="yellow"),
+                    Text("Ollama not reachable.", style="#6272a4"),
                     Text("  Local:  install from https://ollama.com/download, then ollama pull llama3.2", style="dim"),
                     Text("  Cloud:  export OLLAMA_HOST=https://your-ollama-host", style="dim"),
                     Text("  Run /login ollama again after setup.", style="dim"),
@@ -489,7 +550,7 @@ class HydraApp(App):
             self._add_message(Text(f"Unknown CLI: {cli_name}. Choose from: {', '.join(Gateway.LOGIN_COMMANDS)}, ollama", style="red"))
             return
 
-        self._add_message(Text(f"Launching '{' '.join(cmd)}'... complete the login, then return here.", style="yellow"))
+        self._add_message(Text(f"Launching '{' '.join(cmd)}'... complete the login, then return here.", style="#6272a4"))
         with self.suspend():
             try:
                 subprocess.run(cmd, check=False)
@@ -624,7 +685,7 @@ class HydraApp(App):
             tier = cmd.split(" ")[1]
             if tier in ("low", "medium", "high"):
                 self.effort_tier = tier
-                self._add_message(Text(f"Effort tier set to {tier}", style="yellow"))
+                self._add_message(Text(f"Effort tier set to {tier}", style="#6272a4"))
             else:
                 self._add_message(Text(f"Invalid tier: {tier}", style="red"))
             self._update_status()
@@ -635,7 +696,7 @@ class HydraApp(App):
                 self._add_message(Text(f"Usage: /cli <{'|'.join(valid)}>", style="red"))
             else:
                 self.cli_override = None if parts[1] == "auto" else parts[1]
-                self._add_message(Text(f"CLI backend set to {parts[1]}", style="yellow"))
+                self._add_message(Text(f"CLI backend set to {parts[1]}", style="#6272a4"))
             self._update_status()
         elif cmd.startswith("model"):
             parts = user_input.split(" ", 1)  # preserve model name case
@@ -643,7 +704,7 @@ class HydraApp(App):
                 self._add_message(Text("Usage: /model <name|auto>", style="red"))
             else:
                 self.model_override = None if parts[1].lower() == "auto" else parts[1]
-                self._add_message(Text(f"Model override set to {parts[1]}", style="yellow"))
+                self._add_message(Text(f"Model override set to {parts[1]}", style="#6272a4"))
             self._update_status()
         elif cmd.startswith("mode"):
             parts = cmd.split(" ")
@@ -655,7 +716,7 @@ class HydraApp(App):
                     "read-only - no file edits or commands" if self.mode == "plan"
                     else "auto-approve edits and commands"
                 )
-                self._add_message(Text(f"Mode set to {self.mode} ({desc})", style="yellow"))
+                self._add_message(Text(f"Mode set to {self.mode} ({desc})", style="#6272a4"))
             self._update_status()
         elif cmd == "sessions":
             saved = self.sessions.list_sessions()
@@ -684,7 +745,7 @@ class HydraApp(App):
                 self.system_msg = self._build_system_msg_base()
                 self._refresh_system_msg()
                 self._render_history()
-                self._add_message(Text(f"Resumed session {self.session_id}", style="yellow"))
+                self._add_message(Text(f"Resumed session {self.session_id}", style="#6272a4"))
                 self._update_status()
         elif cmd == "cost":
             if not self.usage_log:
@@ -730,7 +791,7 @@ class HydraApp(App):
                 f"Running {len(prompts)} tasks in parallel "
                 f"(each spawns its own CLI process; agentic edits to the same "
                 f"files may conflict)...",
-                style="yellow",
+                style="#6272a4",
             ))
             self._run_parallel(prompts)
         elif cmd.startswith("compare"):
@@ -744,7 +805,7 @@ class HydraApp(App):
                 return
             self._add_message(Text(
                 f"Comparing across {len(active)} CLIs: {', '.join(active)}...",
-                style="yellow",
+                style="#6272a4",
             ))
             self._run_compare(prompt, active)
         elif cmd == "skills":
@@ -814,7 +875,7 @@ class HydraApp(App):
                 self._refresh_system_msg()
                 self._add_message(Text(
                     f"Removed {removed} line(s) matching '{pattern}'" if removed else f"No lines matched '{pattern}'",
-                    style="yellow",
+                    style="#6272a4",
                 ))
         elif cmd == "help":
             self._add_message(Markdown(HELP_TEXT))
@@ -894,7 +955,7 @@ class HydraApp(App):
         mcp_port = _SHARED_MCP.get("port")
         mcp_line = Text(
             f"✓ MCP server running on port {mcp_port}" if mcp_port else "✗ MCP server not started",
-            style="green" if mcp_port else "yellow",
+            style="green" if mcp_port else "#6272a4",
         )
 
         # Project files
@@ -1025,11 +1086,11 @@ class HydraApp(App):
         turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
         if history_chars > self._AUTO_COMPACT_CHARS:
-            self.call_from_thread(self._add_message, Text("↩ Auto-compacting history…", style="dim yellow"))
+            self.call_from_thread(self._add_message, Text("↩ Auto-compacting history…", style="#44475a"))
             try:
                 msg = self._do_compact()
                 if msg:
-                    self.call_from_thread(self._add_message, Text(f"↩ {msg}", style="dim yellow"))
+                    self.call_from_thread(self._add_message, Text(f"↩ {msg}", style="#44475a"))
             except Exception as e:
                 self.call_from_thread(self._add_message, Text(f"Auto-compact failed: {e}", style="red"))
         # Throttle Markdown re-renders: only push UI update every 100ms to avoid
@@ -1188,7 +1249,7 @@ class HydraApp(App):
             if len(turns) < 6:
                 self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
                 return
-            self.call_from_thread(self._add_message, Text("Compacting history…", style="dim yellow"))
+            self.call_from_thread(self._add_message, Text("Compacting history…", style="#44475a"))
             try:
                 msg = self._do_compact()
             except Exception as e:
@@ -1202,7 +1263,7 @@ class HydraApp(App):
     def _run_search(self, query: str) -> None:
         self.call_from_thread(self._inc_workers)
         try:
-            self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="dim yellow"))
+            self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="#44475a"))
             try:
                 results = search(query)
                 formatted = format_results(results)
@@ -1230,7 +1291,7 @@ class HydraApp(App):
 
         # Phase 1 — spec generation with a high-tier model in plan mode.
         self.call_from_thread(self._add_message, Text(
-            "SDD phase 1: generating spec…", style="dim yellow"
+            "SDD phase 1: generating spec…", style="#44475a"
         ))
         spec_prompt = (
             "You are a software architect. Create a concise spec for this task.\n\n"
@@ -1271,12 +1332,12 @@ class HydraApp(App):
         task_lines = _re.findall(r"^TASK \d+:\s*(.+)$", spec, _re.MULTILINE)
         if not task_lines:
             self.call_from_thread(self._add_message, Text(
-                "No TASK lines found in spec output. Try rephrasing or use /parallel.", style="yellow"
+                "No TASK lines found in spec output. Try rephrasing or use /parallel.", style="#6272a4"
             ))
             return
 
         self.call_from_thread(self._add_message, Text(
-            f"SDD phase 2: running {len(task_lines)} parallel agents…", style="dim yellow"
+            f"SDD phase 2: running {len(task_lines)} parallel agents…", style="#44475a"
         ))
 
         # Phase 3 — parallel implementation (each task gets its own Gateway instance).
@@ -1479,7 +1540,7 @@ class HydraApp(App):
 
         diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
         if not diff.strip():
-            self.call_from_thread(self._add_message, Text("Staging all changes…", style="dim yellow"))
+            self.call_from_thread(self._add_message, Text("Staging all changes…", style="#44475a"))
             subprocess.run(["git", "add", "-A"], capture_output=True)
             diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
             if not diff.strip():
@@ -1489,7 +1550,7 @@ class HydraApp(App):
         if message_override:
             commit_msg = message_override
         else:
-            self.call_from_thread(self._add_message, Text("Generating commit message…", style="dim yellow"))
+            self.call_from_thread(self._add_message, Text("Generating commit message…", style="#44475a"))
             prompt = (
                 "Write a conventional commit message for this diff.\n"
                 "Format: type(scope): short description\n"
@@ -1548,7 +1609,7 @@ class HydraApp(App):
             ["git", "diff", "main...HEAD", "--stat"], capture_output=True, text=True,
         ).stdout.strip()
 
-        self.call_from_thread(self._add_message, Text("Generating PR description…", style="dim yellow"))
+        self.call_from_thread(self._add_message, Text("Generating PR description…", style="#44475a"))
         prompt = (
             "Write a GitHub pull request title and description.\n\n"
             f"Branch: {branch}\nCommits:\n{log}\nFiles changed:\n{diff_stat}\n\n"
@@ -1582,7 +1643,7 @@ class HydraApp(App):
         if not title:
             title = branch.replace("-", " ").replace("_", " ")
 
-        self.call_from_thread(self._add_message, Text(f"Pushing {branch}…", style="dim yellow"))
+        self.call_from_thread(self._add_message, Text(f"Pushing {branch}…", style="#44475a"))
         push = subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, text=True)
         if push.returncode != 0:
             self.call_from_thread(self._add_message, Text(f"Push failed: {push.stderr.strip()}", style="red"))

@@ -653,6 +653,27 @@ class Gateway:
         models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
         return [model for model in models if self._cli_for_model(model) != failed_cli]
 
+    def _probe_stream(self, gen: "Generator[str, None, None]", probe_chars: int = 512) -> "tuple[list[str], Generator[str, None, None]]":
+        """Buffer the opening bytes of a stream and raise RateLimitError if they
+        look like a quota message before any chunk is yielded to the caller.
+
+        codex outputs its rate-limit banner as the very first lines of text, so
+        buffering 512 chars is enough to detect it without noticeably delaying
+        real responses.  Returns (buffered_chunks, remainder_gen) on success.
+        """
+        import itertools
+        buffered: list[str] = []
+        total = 0
+        for chunk in gen:
+            buffered.append(chunk)
+            total += len(chunk)
+            if total >= probe_chars:
+                break
+        combined = "".join(buffered).strip()
+        if combined and self._is_rate_limit_text(combined):
+            raise RateLimitError(f"Rate-limit detected in stream preamble: {combined[:200]}")
+        return buffered, gen
+
     def close(self, stop_mcp_server: bool = False) -> None:
         """Releases persistent CLI sessions. Call on app exit.
         Pass stop_mcp_server=True from the main app instance only."""
@@ -718,23 +739,27 @@ class Gateway:
 
                             while b'\n' in buffer:
                                 line_bytes, buffer = buffer.split(b'\n', 1)
-                                line = self._strip_ansi(line_bytes.decode('utf-8', errors='replace').strip())
+                                line = self._strip_ansi(line_bytes.decode('utf-8', errors='replace').rstrip())
+                                stripped = line.strip()
 
-                                if not line or self._is_noise_line(line):
+                                if self._is_noise_line(stripped):
                                     continue
 
                                 if line_parser:
-                                    chunk, line_tokens = line_parser(line)
+                                    chunk, line_tokens = line_parser(stripped)
                                     if line_tokens is not None:
                                         tokens = line_tokens
                                 else:
-                                    chunk = line
+                                    # Preserve blank lines as paragraph breaks in markdown.
+                                    chunk = line if line else ""
 
-                                if chunk:
-                                    self._raise_if_rate_limited_output(cli_name, chunk)
-                                    yielded_any = True
-                                    last_output_time = time.time()
-                                    yield chunk
+                                if chunk is not None:
+                                    if stripped:
+                                        self._raise_if_rate_limited_output(cli_name, stripped)
+                                    if chunk or yielded_any:  # emit blank lines only after content starts
+                                        yielded_any = yielded_any or bool(stripped)
+                                        last_output_time = time.time()
+                                        yield chunk + "\n"
 
                         except OSError:
                             break  # Master fd closed or EOF
@@ -749,18 +774,19 @@ class Gateway:
 
                 # Flush remaining buffer if it doesn't end in newline
                 if buffer:
-                    line = buffer.decode('utf-8', errors='replace').strip()
-                    if line and not self._is_noise_line(line):
+                    line = buffer.decode('utf-8', errors='replace').rstrip()
+                    stripped = line.strip()
+                    if stripped and not self._is_noise_line(stripped):
                         if line_parser:
-                            chunk, line_tokens = line_parser(line)
+                            chunk, line_tokens = line_parser(stripped)
                             if line_tokens is not None:
                                 tokens = line_tokens
                         else:
                             chunk = line
                         if chunk:
-                            self._raise_if_rate_limited_output(cli_name, chunk)
+                            self._raise_if_rate_limited_output(cli_name, stripped)
                             yielded_any = True
-                            yield chunk
+                            yield chunk + "\n"
 
             finally:
                 sel.close()
@@ -963,7 +989,7 @@ class Gateway:
                     if cli_name == "ollama"
                     else self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
                 )
-                first_chunk = next(gen)
+                buffered, gen = self._probe_stream(gen)
             except StopIteration:
                 models = self._fallback_models_after_override(cli_name, tier)
                 last_exception = None
@@ -979,7 +1005,7 @@ class Gateway:
                 else:
                     raise
             else:
-                yield first_chunk
+                yield from buffered
                 yield from gen
                 return
         else:
@@ -994,7 +1020,7 @@ class Gateway:
                     if cli == "ollama"
                     else self._run_cli_stream(cli, messages, model, tier=tier, mode=mode, media_files=media_files)
                 )
-                first_chunk = next(gen)
+                buffered, gen = self._probe_stream(gen)
             except StopIteration:
                 continue
             except RateLimitError as e:
@@ -1007,7 +1033,7 @@ class Gateway:
                 last_exception = e
                 continue
 
-            yield first_chunk
+            yield from buffered
             yield from gen
             return
 
