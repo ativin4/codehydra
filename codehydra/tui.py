@@ -175,6 +175,10 @@ class PromptTextArea(TextArea):
             event.prevent_default()
             event.stop()
             self.app._open_in_editor()
+        elif event.key == "ctrl+y":
+            event.prevent_default()
+            event.stop()
+            self.app._copy_last_response()
         elif event.key == "ctrl+c":
             # Textual runs the tty in raw mode (ISIG off), so Ctrl+C arrives here
             # as a key event, not an OS SIGINT — this is the one live path.
@@ -378,7 +382,7 @@ class HydraApp(App):
         unauthenticated = [cli for cli, ok in auth_status.items() if not ok and cli in Gateway.LOGIN_COMMANDS]
 
         ready_names = [_CLI_DISPLAY.get(c, c) for c in ready]
-        header = Text("CodeHydra", style="bold green")
+        header = Text("CodeHydra", style="bold #a6e3a1")
         if ready_names:
             sub = Text(f"  {', '.join(ready_names)} ready", style="dim")
             self._add_message(Group(header, sub))
@@ -1046,6 +1050,37 @@ class HydraApp(App):
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        """Copy text to clipboard. Returns True on success."""
+        import sys as _sys
+        try:
+            if _sys.platform == "darwin":
+                subprocess.run(["pbcopy"], input=text, text=True, check=True)
+            else:
+                # Linux: try xclip then xsel then wl-copy (Wayland)
+                for cmd in (["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"], ["wl-copy"]):
+                    if shutil.which(cmd[0]):
+                        subprocess.run(cmd, input=text, text=True, check=True)
+                        break
+                else:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _copy_last_response(self) -> None:
+        """Ctrl+Y: copy the most recent assistant response to the clipboard."""
+        responses = [m["content"] for m in self.history if m["role"] == Role.ASSISTANT]
+        if not responses:
+            self._add_message(Text("Nothing to copy yet.", style="dim"))
+            return
+        text = responses[-1]
+        if self._copy_to_clipboard(text):
+            preview = text[:60].replace("\n", " ")
+            self._add_message(Text(f"Copied to clipboard: {preview}…", style="#6272a4"))
+        else:
+            self._add_message(Text("Clipboard not available. Install xclip/xsel or use pbcopy.", style="red"))
 
     @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str, media_files: list[Path] | None = None) -> None:

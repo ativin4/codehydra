@@ -759,7 +759,10 @@ class Gateway:
                                     if chunk or yielded_any:  # emit blank lines only after content starts
                                         yielded_any = yielded_any or bool(stripped)
                                         last_output_time = time.time()
-                                        yield chunk + "\n"
+                                        # Double newline so Markdown renders each
+                                        # output line as a separate paragraph, not
+                                        # one run-on block.
+                                        yield chunk + ("\n\n" if chunk else "\n")
 
                         except OSError:
                             break  # Master fd closed or EOF
@@ -786,7 +789,7 @@ class Gateway:
                         if chunk:
                             self._raise_if_rate_limited_output(cli_name, stripped)
                             yielded_any = True
-                            yield chunk + "\n"
+                            yield chunk + "\n\n"
 
             finally:
                 sel.close()
@@ -951,6 +954,8 @@ class Gateway:
                 self._mark_rate_limited(self._cli_for_model(model))
                 last_exception = e
                 continue
+            except InterruptedError:
+                raise
             except Exception as e:
                 if self._RATE_LIMIT_RE.search(str(e)):
                     self._mark_rate_limited(self._cli_for_model(model))
@@ -997,13 +1002,15 @@ class Gateway:
                 self._mark_rate_limited(cli_name)
                 models = self._fallback_models_after_override(cli_name, tier)
                 last_exception = e
+            except InterruptedError:
+                # User cancelled — don't fall back, just propagate.
+                raise
             except Exception as e:
                 if self._is_rate_limit_text(str(e)):
                     self._mark_rate_limited(cli_name)
-                    models = self._fallback_models_after_override(cli_name, tier)
-                    last_exception = e
-                else:
-                    raise
+                # Always fall back on any exception (session crash, auth error, etc.)
+                models = self._fallback_models_after_override(cli_name, tier)
+                last_exception = e
             else:
                 yield from buffered
                 yield from gen
