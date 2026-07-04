@@ -118,6 +118,7 @@ class Gateway:
         self.classifier = Classifier()
         self.last_usage: Optional[Dict] = None
         self._cancel_event = None  # set by TUI to a threading.Event before each request
+        self.on_fallback = None   # optional callable(msg: str) set by TUI for fallback notifications
 
         # Start the shared HTTP MCP server (once per process) so all CLIs
         # connect to the same long-running server rather than spawning a new
@@ -503,6 +504,11 @@ class Gateway:
         "MCP issues detected", "mcp-remote", "growwmcp", "chrome-devtools",
         "mcpServer", "mcp_server",
     )
+    _CODEX_NOISE_RE = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T[^\s]+Z\s+ERROR\s+codex_models_manager::manager:|"
+        r"failed to refresh available models",
+        re.IGNORECASE,
+    )
 
     @classmethod
     def _is_noise_line(cls, line: str) -> bool:
@@ -512,6 +518,19 @@ class Gateway:
                 return True
         for sub in cls._NOISE_SUBSTRINGS:
             if sub in line:
+                return True
+        return False
+
+    @classmethod
+    def _is_cli_noise_line(cls, cli_name: str, line: str) -> bool:
+        if cls._is_noise_line(line):
+            return True
+        if cli_name == CLI.CODEX:
+            # Codex can print model-refresh diagnostics and tool/event labels to
+            # the PTY before the final answer. Keep those out of the transcript.
+            if cls._CODEX_NOISE_RE.search(line):
+                return True
+            if line.strip().lower() in {"codex", "exec"}:
                 return True
         return False
 
@@ -534,7 +553,7 @@ class Gateway:
                 raise Exception(f"{cli_name} CLI failed: {err_output}")
 
             output = self._strip_ansi(output)
-            cleaned_lines = [line for line in output.split("\n") if not self._is_noise_line(line)]
+            cleaned_lines = [line for line in output.split("\n") if not self._is_cli_noise_line(cli_name, line.strip())]
             final_output = "\n".join(cleaned_lines).strip()
             if not final_output:
                 raise Exception(f"{cli_name} CLI returned no usable output. STDOUT: {output} STDERR: {err_output}")
@@ -742,7 +761,7 @@ class Gateway:
                                 line = self._strip_ansi(line_bytes.decode('utf-8', errors='replace').rstrip())
                                 stripped = line.strip()
 
-                                if self._is_noise_line(stripped):
+                                if self._is_cli_noise_line(cli_name, stripped):
                                     continue
 
                                 if line_parser:
@@ -779,7 +798,7 @@ class Gateway:
                 if buffer:
                     line = buffer.decode('utf-8', errors='replace').rstrip()
                     stripped = line.strip()
-                    if stripped and not self._is_noise_line(stripped):
+                    if stripped and not self._is_cli_noise_line(cli_name, stripped):
                         if line_parser:
                             chunk, line_tokens = line_parser(stripped)
                             if line_tokens is not None:
@@ -976,72 +995,104 @@ class Gateway:
     ) -> Generator[str, None, None]:
         """Like request(), but yields output incrementally as the CLI produces it.
 
-        Fallback to the next model only happens if the chosen CLI fails before
-        yielding a real chunk; once any non-quota chunk is yielded, that model
-        is committed.
+        Fallback to the next model happens for startup/probe failures and for
+        mid-stream crashes. User cancellation still propagates immediately.
         """
         if tier is None:
             tier = self.classifier.evaluate(prompt)
 
         messages = history + [{"role": Role.USER, "content": prompt}]
 
+        def _notify_fallback(msg: str) -> None:
+            callback = getattr(self, "on_fallback", None)
+            if callable(callback):
+                callback(msg)
+
+        def _try_stream(cli_name: str, model: str):
+            """Start a stream and probe it. Returns (buffered, gen) or raises."""
+            gen = (
+                self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
+                if cli_name == "ollama"
+                else self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
+            )
+            return self._probe_stream(gen)
+
+        def _mark_failed_and_notify(cli_name: str, err: Exception, *, mid_stream: bool = False) -> None:
+            if isinstance(err, RateLimitError) or self._is_rate_limit_text(str(err)):
+                self._mark_rate_limited(cli_name)
+                _notify_fallback(f"↩ {cli_name} rate-limited — trying next…")
+            else:
+                self._mark_rate_limited(cli_name, seconds=30)
+                suffix = " failed mid-response" if mid_stream else " failed"
+                _notify_fallback(f"↩ {cli_name}{suffix} — trying next…")
+
+        def _yield_stream(buffered, gen, cli_name: str, fallback_models):
+            """Yield from buffered + gen, falling back to fallback_models on mid-stream crash."""
+            yield from buffered
+            try:
+                yield from gen
+            except InterruptedError:
+                raise
+            except Exception as mid_err:
+                _mark_failed_and_notify(cli_name, mid_err, mid_stream=True)
+                last_exception = mid_err
+                for idx, fb_model in enumerate(fallback_models):
+                    fb_cli = self._cli_for_model(fb_model)
+                    if fb_cli == cli_name:
+                        continue
+                    try:
+                        fb_buf, fb_gen = _try_stream(fb_cli, fb_model)
+                        remaining = fallback_models[idx + 1:]
+                        yield from _yield_stream(fb_buf, fb_gen, fb_cli, remaining)
+                        return
+                    except InterruptedError:
+                        raise
+                    except StopIteration:
+                        continue
+                    except Exception as fb_err:
+                        _mark_failed_and_notify(fb_cli, fb_err)
+                        last_exception = fb_err
+                        continue
+                raise last_exception
+
         resolved = self._resolve_cli_and_model(cli_override, model_override, tier)
         if resolved:
             cli_name, model = resolved
+            all_models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
+            fallback_models = [m for m in all_models if self._cli_for_model(m) != cli_name]
             try:
-                gen = (
-                    self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
-                    if cli_name == "ollama"
-                    else self._run_cli_stream(cli_name, messages, model, tier=tier, mode=mode, media_files=media_files)
-                )
-                buffered, gen = self._probe_stream(gen)
+                buffered, gen = _try_stream(cli_name, model)
             except StopIteration:
-                models = self._fallback_models_after_override(cli_name, tier)
+                models = fallback_models
                 last_exception = None
-            except RateLimitError as e:
-                self._mark_rate_limited(cli_name)
-                models = self._fallback_models_after_override(cli_name, tier)
-                last_exception = e
             except InterruptedError:
-                # User cancelled — don't fall back, just propagate.
                 raise
             except Exception as e:
-                if self._is_rate_limit_text(str(e)):
-                    self._mark_rate_limited(cli_name)
-                # Always fall back on any exception (session crash, auth error, etc.)
-                models = self._fallback_models_after_override(cli_name, tier)
+                _mark_failed_and_notify(cli_name, e)
+                models = fallback_models
                 last_exception = e
             else:
-                yield from buffered
-                yield from gen
+                yield from _yield_stream(buffered, gen, cli_name, fallback_models)
                 return
         else:
             models = self._prioritize_models(self.model_map.get(tier, self.model_map[Tier.MEDIUM]))
             last_exception = None
 
         for model in models:
+            cli = self._cli_for_model(model)
+            all_remaining = [m for m in models if m != model]
             try:
-                cli = self._cli_for_model(model)
-                gen = (
-                    self._run_oss_stream(model, messages, tier=tier, media_files=media_files)
-                    if cli == "ollama"
-                    else self._run_cli_stream(cli, messages, model, tier=tier, mode=mode, media_files=media_files)
-                )
-                buffered, gen = self._probe_stream(gen)
+                buffered, gen = _try_stream(cli, model)
             except StopIteration:
                 continue
-            except RateLimitError as e:
-                self._mark_rate_limited(self._cli_for_model(model))
-                last_exception = e
-                continue
+            except InterruptedError:
+                raise
             except Exception as e:
-                if self._RATE_LIMIT_RE.search(str(e)):
-                    self._mark_rate_limited(self._cli_for_model(model))
+                _mark_failed_and_notify(cli, e)
                 last_exception = e
                 continue
 
-            yield from buffered
-            yield from gen
+            yield from _yield_stream(buffered, gen, cli, all_remaining)
             return
 
         raise last_exception or Exception("All CLIs failed. No active subscriptions found.")

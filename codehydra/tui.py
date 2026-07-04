@@ -268,6 +268,14 @@ class HydraApp(App):
         padding-left: 2;
         margin-bottom: 0;
     }
+    .route-note {
+        color: #6272a4;
+        text-style: italic;
+        padding-left: 2;
+        border-left: solid #313244;
+        margin-top: 0;
+        margin-bottom: 0;
+    }
 
     /* ── Markdown link/code colours ─────────────────────────────── */
     Markdown {
@@ -605,6 +613,96 @@ class HydraApp(App):
         self._history_scroll.mount(w, before=before)
         self._history_scroll.scroll_end(animate=False)
         return w
+
+    def _add_route_note(self, msg: str) -> Widget:
+        return self._add_message(Static(msg, classes="route-note"))
+
+    @staticmethod
+    def _snapshot_git_state() -> dict:
+        """Capture git state before a request for delta diff computation."""
+        status_r = subprocess.run(
+            ["git", "status", "--porcelain", "-u"],
+            capture_output=True, text=True, cwd=Path.cwd()
+        )
+        diff_r = subprocess.run(
+            ["git", "diff", "--no-color", "-U3"],
+            capture_output=True, text=True, cwd=Path.cwd()
+        )
+        untracked = {line[3:].strip() for line in status_r.stdout.splitlines() if line.startswith("??")}
+        return {"status": status_r.stdout, "diff": diff_r.stdout, "untracked": untracked}
+
+    def _show_file_diff(self, before: dict) -> None:
+        """Call from worker thread. Show only changes made DURING the last response."""
+        after_status_r = subprocess.run(
+            ["git", "status", "--porcelain", "-u"],
+            capture_output=True, text=True, cwd=Path.cwd()
+        )
+        after_diff_r = subprocess.run(
+            ["git", "diff", "--no-color", "-U3"],
+            capture_output=True, text=True, cwd=Path.cwd()
+        )
+        after_status = after_status_r.stdout
+        after_diff = after_diff_r.stdout
+        after_untracked = {line[3:].strip() for line in after_status.splitlines() if line.startswith("??")}
+        new_files = after_untracked - before["untracked"]
+
+        if after_status == before["status"] and after_diff == before["diff"]:
+            return
+
+        parts: list[str] = []
+
+        # For tracked modifications: show only file sections not present before.
+        if after_diff != before["diff"]:
+            if not before["diff"].strip():
+                # No pre-existing uncommitted changes — safe to show all.
+                parts.append(after_diff.strip())
+            else:
+                # Extract only newly-changed file sections (not pre-existing ones).
+                before_file_paths: set[str] = set()
+                for line in before["diff"].splitlines():
+                    if line.startswith("diff --git "):
+                        before_file_paths.add(line.split(" b/")[-1])
+
+                current_header: str | None = None
+                current_path: str | None = None
+                current_lines: list[str] = []
+
+                def _flush():
+                    if current_path and current_path not in before_file_paths and current_lines:
+                        parts.append("\n".join(current_lines))
+
+                for line in after_diff.splitlines():
+                    if line.startswith("diff --git "):
+                        _flush()
+                        current_header = line
+                        current_path = line.split(" b/")[-1]
+                        current_lines = [line]
+                    else:
+                        current_lines.append(line)
+                _flush()
+
+        # New untracked files — render as full-addition diff blocks.
+        for path in sorted(new_files):
+            try:
+                fp = Path.cwd() / path
+                if not fp.exists() or fp.stat().st_size > 50_000:
+                    parts.append(f"--- /dev/null\n+++ b/{path}\n@@ New file @@")
+                    continue
+                lines = fp.read_text(errors="replace").splitlines()
+                header = f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@"
+                body = "\n".join(f"+{l}" for l in lines)
+                parts.append(f"{header}\n{body}")
+            except Exception:
+                parts.append(f"--- /dev/null\n+++ b/{path}\n@@ New file @@")
+
+        if not parts:
+            return
+
+        full_diff = "\n\n".join(parts)
+        if len(full_diff) > 6000:
+            full_diff = full_diff[:6000] + "\n… (truncated)"
+
+        self.call_from_thread(self._add_message, Markdown(f"```diff\n{full_diff}\n```"))
 
     def _render_history(self) -> None:
         history = self._history_scroll
@@ -1213,9 +1311,10 @@ class HydraApp(App):
         self._update_status()
 
     def _run_prompt_inner(self, prompt: str, media_files: list[Path] | None = None) -> None:
-        # Give gateway a reference to our cancel event so it can interrupt
-        # blocking queue.get() calls inside ClaudeSession (e.g. during MCP tool runs).
         self.gateway._cancel_event = self._cancel_event
+        self.gateway.on_fallback = lambda msg: self.call_from_thread(
+            self._add_route_note, msg
+        )
         self.call_from_thread(self._refresh_system_msg)
         turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
@@ -1233,6 +1332,8 @@ class HydraApp(App):
         _THINK_FRAMES = ("⟳", "◐", "◓", "◑", "◒")
         _MAX_BUILD_RETRIES = 3
 
+        _git_snap_before = self._snapshot_git_state()
+
         for _build_attempt in range(_MAX_BUILD_RETRIES):
             if self._cancel_event.is_set():
                 return
@@ -1240,7 +1341,7 @@ class HydraApp(App):
             # Show a waiting indicator immediately — visible even for non-thinking
             # models that have latency before the first token arrives.
             waiting_w = self.call_from_thread(self._mount_thinking_widget, md_w)
-            self.call_from_thread(waiting_w.update, "⟳ Waiting…")
+            self.call_from_thread(waiting_w.update, "⟳ Thinking… 0s")
             thinking_w = waiting_w
             thinking_start = time.time()
             thinking_chars = 0
@@ -1248,6 +1349,18 @@ class HydraApp(App):
             in_thinking = False
             last_md_push = 0.0
             first_token = False
+            timer_stop = threading.Event()
+
+            def _tick_thinking_timer() -> None:
+                while not timer_stop.wait(1):
+                    if thinking_w is None or self._cancel_event.is_set():
+                        continue
+                    secs = int(time.time() - thinking_start)
+                    frame = _THINK_FRAMES[secs % len(_THINK_FRAMES)]
+                    suffix = f" ({thinking_chars:,} chars)" if in_thinking and thinking_chars else ""
+                    self.call_from_thread(thinking_w.update, f"{frame} Thinking… {secs}s{suffix}")
+
+            threading.Thread(target=_tick_thinking_timer, daemon=True).start()
             try:
                 for chunk in self.gateway.request_stream(
                     prompt,
@@ -1267,7 +1380,7 @@ class HydraApp(App):
                         in_thinking = True
                         thinking_start = time.time()
                         # Reuse existing waiting widget as the thinking widget
-                        self.call_from_thread(thinking_w.update, "⟳ Thinking…")
+                        self.call_from_thread(thinking_w.update, "⟳ Thinking… 0s")
                         continue
                     if chunk == THINKING_END:
                         in_thinking = False
@@ -1283,7 +1396,8 @@ class HydraApp(App):
                         # Animate thinking indicator every 500 chars of thought.
                         if thinking_w is not None and thinking_chars % 500 < len(chunk):
                             frame = _THINK_FRAMES[(thinking_chars // 500) % len(_THINK_FRAMES)]
-                            self.call_from_thread(thinking_w.update, f"{frame} Thinking… ({thinking_chars:,} chars)")
+                            secs = int(time.time() - thinking_start)
+                            self.call_from_thread(thinking_w.update, f"{frame} Thinking… {secs}s ({thinking_chars:,} chars)")
                     else:
                         if not first_token:
                             # First real text chunk: dismiss the waiting indicator
@@ -1309,6 +1423,8 @@ class HydraApp(App):
                     self.call_from_thread(thinking_w.update, "↓ Thinking interrupted")
                 self.call_from_thread(md_w.update, f"**Error:** {e}")
                 return
+            finally:
+                timer_stop.set()
 
             # Final flush — ensure last partial chunk is displayed.
             if response:
@@ -1335,6 +1451,7 @@ class HydraApp(App):
             if usage:
                 self.usage_log.append(usage)
             self._save_session()
+            self._show_file_diff(_git_snap_before)
 
             patched_files = self.patcher.apply_all_patches(response)
             if not patched_files:
