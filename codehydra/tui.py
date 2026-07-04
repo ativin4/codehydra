@@ -14,7 +14,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widget import Widget
-from textual.widgets import TextArea, Markdown, Static
+from textual.widgets import TextArea, Markdown, Static, ListView, ListItem, Label
 
 from codehydra.routing.claude_session import THINKING_END, THINKING_START
 from codehydra.routing.constants import CLI, Mode, Role, Tier
@@ -69,7 +69,7 @@ SLASH_COMMANDS = [
     "/cost", "/clear", "/compact", "/help", "/exit",
     "/memory", "/remember", "/forget",
     "/search",
-    "/doctor",
+    "/status", "/doctor",
     "/commit",
     "/pr",
     "/tasks",
@@ -170,7 +170,21 @@ class PromptTextArea(TextArea):
         elif event.key == "tab":
             event.prevent_default()
             event.stop()
-            self.app._complete_at_ref()
+            # If autocomplete popup is visible, accept highlighted item
+            if not self.app._accept_autocomplete():
+                self.app._complete_at_ref()
+        elif event.key in ("up", "down") and self.app._autocomplete_visible():
+            # Let up/down navigate the popup instead of prompt history
+            event.prevent_default()
+            event.stop()
+            lv = self.app.query_one("#autocomplete", ListView)
+            if event.key == "up":
+                lv.action_cursor_up()
+            else:
+                lv.action_cursor_down()
+            return
+        elif event.key == "escape":
+            self.app._hide_autocomplete()
         elif event.key == "ctrl+e":
             event.prevent_default()
             event.stop()
@@ -292,6 +306,28 @@ class HydraApp(App):
         border-left: solid #44475a;
         padding-left: 2;
     }
+
+    /* ── slash-command autocomplete popup ───────────────────────── */
+    #autocomplete {
+        display: none;
+        height: auto;
+        max-height: 8;
+        margin: 0 1;
+        background: #1e1e2e;
+        border: tall #6272a4;
+    }
+    #autocomplete.visible {
+        display: block;
+    }
+    #autocomplete > ListItem {
+        padding: 0 1;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+    #autocomplete > ListItem.--highlight {
+        background: #313244;
+        color: #cba6f7;
+    }
     """
 
     BINDINGS = []
@@ -371,6 +407,7 @@ class HydraApp(App):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="history")
         yield Static(id="status")
+        yield ListView(id="autocomplete")
         text_area = PromptTextArea(id="input-area", language="markdown")
         text_area.text = ""
         yield text_area
@@ -421,6 +458,64 @@ class HydraApp(App):
                 self._render_history()
                 self._add_message(Text(f"Resumed session {self.session_id}", style="#6272a4"))
                 self._update_status()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Update slash-command autocomplete popup as the user types."""
+        if event.text_area.id != "input-area":
+            return
+        text = event.text_area.text
+        # Only show popup when first line starts with / and has no space yet
+        first_line = text.split("\n")[0]
+        if first_line.startswith("/") and " " not in first_line:
+            self._refresh_autocomplete(first_line)
+        else:
+            self._hide_autocomplete()
+
+    def _autocomplete_visible(self) -> bool:
+        try:
+            lv = self.query_one("#autocomplete", ListView)
+            return "visible" in lv.classes
+        except Exception:
+            return False
+
+    def _hide_autocomplete(self) -> None:
+        try:
+            self.query_one("#autocomplete", ListView).remove_class("visible")
+        except Exception:
+            pass
+
+    def _refresh_autocomplete(self, prefix: str) -> None:
+        all_commands = SLASH_COMMANDS + [f"/skill {n}" for n in _skill_names()]
+        lower = prefix.lower()
+        matches = [c for c in all_commands if c.startswith(lower) and c != lower][:6]
+        lv = self.query_one("#autocomplete", ListView)
+        lv.clear()
+        if not matches:
+            lv.remove_class("visible")
+            return
+        for cmd in matches:
+            lv.append(ListItem(Label(cmd)))
+        lv.index = 0
+        lv.add_class("visible")
+
+    def _accept_autocomplete(self) -> bool:
+        """Accept highlighted autocomplete item. Returns True if popup was open."""
+        if not self._autocomplete_visible():
+            return False
+        lv = self.query_one("#autocomplete", ListView)
+        item = lv.highlighted_child
+        if item is None:
+            self._hide_autocomplete()
+            return True
+        label = item.query_one(Label)
+        text = str(label.renderable)
+        area = self.query_one("#input-area", TextArea)
+        lines = area.text.split("\n")
+        lines[0] = text
+        area.text = "\n".join(lines)
+        area.move_cursor((0, len(text)))
+        self._hide_autocomplete()
+        return True
 
     # -- helpers -----------------------------------------------------
 
@@ -638,6 +733,7 @@ class HydraApp(App):
 
     def action_submit_input(self) -> None:
         """Submit the current input."""
+        self._hide_autocomplete()
         text_area = self.query_one("#input-area", TextArea)
         text = text_area.text.strip()
         text_area.text = ""
@@ -883,7 +979,7 @@ class HydraApp(App):
                 ))
         elif cmd == "help":
             self._add_message(Markdown(HELP_TEXT))
-        elif cmd == "doctor":
+        elif cmd in ("doctor", "status"):
             self._run_doctor()
         elif cmd == "tasks":
             self._show_tasks()
@@ -1141,12 +1237,17 @@ class HydraApp(App):
             if self._cancel_event.is_set():
                 return
             md_w = self.call_from_thread(self._add_response_turn)
-            thinking_w = None
-            thinking_start = None
+            # Show a waiting indicator immediately — visible even for non-thinking
+            # models that have latency before the first token arrives.
+            waiting_w = self.call_from_thread(self._mount_thinking_widget, md_w)
+            self.call_from_thread(waiting_w.update, "⟳ Waiting…")
+            thinking_w = waiting_w
+            thinking_start = time.time()
             thinking_chars = 0
             response = ""
             in_thinking = False
             last_md_push = 0.0
+            first_token = False
             try:
                 for chunk in self.gateway.request_stream(
                     prompt,
@@ -1165,7 +1266,8 @@ class HydraApp(App):
                     if chunk == THINKING_START:
                         in_thinking = True
                         thinking_start = time.time()
-                        thinking_w = self.call_from_thread(self._mount_thinking_widget, md_w)
+                        # Reuse existing waiting widget as the thinking widget
+                        self.call_from_thread(thinking_w.update, "⟳ Thinking…")
                         continue
                     if chunk == THINKING_END:
                         in_thinking = False
@@ -1174,6 +1276,7 @@ class HydraApp(App):
                             label = f"↓ Thought for {secs}s" if secs > 0 else "↓ Thought"
                             self.call_from_thread(thinking_w.set_classes, "thinking-done")
                             self.call_from_thread(thinking_w.update, label)
+                            thinking_w = None
                         continue
                     if in_thinking:
                         thinking_chars += len(chunk)
@@ -1182,6 +1285,12 @@ class HydraApp(App):
                             frame = _THINK_FRAMES[(thinking_chars // 500) % len(_THINK_FRAMES)]
                             self.call_from_thread(thinking_w.update, f"{frame} Thinking… ({thinking_chars:,} chars)")
                     else:
+                        if not first_token:
+                            # First real text chunk: dismiss the waiting indicator
+                            first_token = True
+                            if thinking_w is not None:
+                                self.call_from_thread(thinking_w.remove)
+                                thinking_w = None
                         response += chunk
                         now = time.monotonic()
                         if now - last_md_push >= _MD_INTERVAL:
