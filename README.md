@@ -1,110 +1,170 @@
-# 🐍 CodeHydra: The BYOS Terminal Coding Agent
+# CodeHydra
 
-**Bring Your Own Subscription (BYOS).** CodeHydra is a zero-GUI, autonomous coding agent that bypasses pay-per-token API gates by scavenging local OAuth session tokens from your official developer tools.
+**One TUI. Every coding CLI you subscribe to.**
+
+> Session expired mid-task. Again. You're on Claude Pro, Codex, and Agy — and none of them last the whole day. You manually copy your context, paste it into the next one, and wait hours for the reset. CodeHydra fixes this.
+
+<!-- demo gif goes here -->
+<!-- ![CodeHydra demo](assets/demo.gif) -->
 
 [![Tests](https://github.com/ativin4/codehydra/actions/workflows/test.yml/badge.svg)](https://github.com/ativin4/codehydra/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## ⚡ Core Superpowers
+---
 
-- **Subscription Scavenging**: Automatically finds and uses tokens from `Claude Code`, `Agy CLI`, `GitHub Copilot`/`Codex`, and `Google Cloud ADC`.
-- **OSS Model Fallback**: Falls back to [Ollama](https://ollama.com) (local or cloud) during rate-limits or refresh windows — set `OLLAMA_HOST` for a remote instance; no subscription gap means no conversation interruption.
-- **Multi-CLI Gateway**: Routes each turn to `claude`, `agy`, `codex`, or `ollama` based on effort tier and which subscriptions/daemons are active, with automatic fallback if one fails.
-- **Agentic Passthrough**: The chosen CLI edits files directly (auto-approve/yolo mode) — no fragile diff-parsing required.
-- **Live Streaming**: Responses render incrementally, token-by-token, as `claude`/`agy` produce them (via `stream-json`).
-- **Persistent Claude Session**: `claude` runs as a long-lived `stream-json` process, reused across turns - only the first turn pays CLI startup cost, and `/mode`/`/model` changes or a new conversation transparently restart it.
-- **Claude Code-style TUI**: A scrollable history pane with a pinned input box at the bottom, built with `textual`.
-- **Self-Healing Loop**: If the agent makes a change that breaks your build, it reads the `stderr` and fixes it automatically.
-- **Workspace-Aware**: Injects a compact AST-tree map of your entire project into the LLM context.
-- **Sessions**: Conversation history, routing state, and usage are persisted to `.codehydra/sessions/` and resumable across runs.
-- **Usage Tracking**: `/cost` summarizes which CLI/model/tier handled each turn and token counts where reported.
-- **MCP Native**: Declare MCP servers in `.agentrc.toml` and they're wired into whichever backend CLI is active.
-- **Autonomous Subagents**: Every backend CLI is given a built-in `dispatch_agents` tool (mirroring Claude Code's Task tool) so it can fan independent sub-tasks out to parallel CodeHydra-routed agents on its own, mid-turn.
-- **Background Tasks**: The same built-in toolset gives the CLI `run_in_background`/`get_background_output`/`stop_background_task` (mirroring Claude Code's background Bash + Monitor) for long-lived processes like dev servers, surviving past the current turn.
-- **Configurable Routing**: Override CLI priority and model choices per tier in `.agentrc.toml` without touching code.
+## The Problem
 
-## 🚀 Quick Start
+If you use Claude Code, Agy, or Codex with a **subscription** (not API keys), you hit:
 
-### 1. Prerequisites
-Ensure you have [uv](https://github.com/astral-sh/uv) installed:
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+- Session limits that expire mid-task
+- 2–4 hour waits for reset windows
+- Manual context copy-paste between CLIs
+- Losing your train of thought every time
+
+## What CodeHydra Does
+
+Routes each prompt to whichever CLI is currently active. When one hits its session limit, it automatically falls back to the next — **without interrupting your workflow**.
+
+```
+Your prompt → [Claude] rate limited? → [Agy] rate limited? → [Codex] → [Ollama]
 ```
 
-### 2. Installation
+- **Auto-fallback** — session expires silently, work continues
+- **Persistent sessions** — resume exactly where you left off (`codehydra --resume`)
+- **Streaming responses** — token-by-token output, real-time
+- **Parallel tasks** — `/parallel "task 1" "task 2"` runs multiple prompts concurrently
+- **MCP native** — declare MCP servers in `.agentrc.toml`, they're wired in automatically
+- **Effort tiers** — route low/medium/high effort prompts to appropriate models
+- **Ollama fallback** — local or remote OSS models as last-resort backup
+
+---
+
+## Install
+
+**Requirements:** Python 3.11+, [pipx](https://pipx.pypa.io), at least one of: `claude`, `agy`, or `codex` on PATH.
+
+```bash
+# From GitHub (no clone needed)
+pipx install git+https://github.com/ativin4/codehydra.git
+
+# Or clone and install in editable mode (code changes take effect immediately)
+git clone https://github.com/ativin4/codehydra.git
+cd codehydra
+pipx install --editable .
+```
+
+> **No pipx?** `brew install pipx` (macOS) or `pip install pipx`
+
+## Usage
+
+```bash
+codehydra              # start fresh session
+codehydra --resume     # pick a previous session interactively
+codehydra -r <id>      # resume a specific session by ID
+```
+
+---
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/effort <low\|medium\|high>` | Set effort tier — affects which model gets used |
+| `/cli <auto\|claude\|agy\|codex\|ollama>` | Pin a specific CLI for this session |
+| `/model <name\|auto>` | Override the model directly |
+| `/mode <plan\|yolo>` | `plan` = read-only; `yolo` = auto-approve edits (default) |
+| `/parallel "task 1" "task 2"` | Run multiple prompts concurrently |
+| `/resume [id]` | Resume a saved session in-TUI |
+| `/sessions` | List all saved sessions |
+| `/status` | Show CLI health, auth state, MCP status |
+| `/cost` | Per-turn breakdown of CLIs, models, and token usage |
+| `/clear` | Reset conversation history |
+| `/login <claude\|agy\|codex\|ollama>` | Trigger auth flow for a CLI |
+| Ctrl+C | Cancel active request |
+| Ctrl+Y | Copy last response to clipboard |
+| Ctrl+Enter / Shift+Enter | Insert newline in prompt |
+
+---
+
+## Configuration (`.agentrc.toml`)
+
+Drop this in your project root:
+
+```toml
+[build]
+command = "pytest"   # auto-runs after edits; feeds errors back to the agent
+
+[mcp.servers.chrome]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-puppeteer"]
+
+[routing]
+priority = ["claude", "agy", "codex", "ollama"]
+
+[routing.models.claude]
+high   = "claude-sonnet-4-5"
+medium = "claude-haiku-4-5"
+low    = "claude-haiku-4-5"
+```
+
+---
+
+## Ollama (OSS model fallback)
+
+```bash
+ollama pull llama3.2          # or qwen2.5-coder, deepseek-r1, etc.
+# In CodeHydra:
+/cli ollama
+/model llama3.2
+
+# Remote instance:
+export OLLAMA_HOST=https://your-ollama-host
+```
+
+---
+
+## Current State
+
+This is an early-stage project. The core loop (routing, fallback, sessions, streaming) works. Known rough edges:
+
+- Agy fallback sometimes needs a second prompt to kick in
+- Extended thinking output can be slow to appear
+- `/login agy` currently suspends the TUI instead of overlaying
+
+**This is where you come in.**
+
+---
+
+## Contributing
+
+The codebase is small and readable. Main files:
+
+| File | What's in it |
+|---|---|
+| `codehydra/tui.py` | Textual TUI app, all UI and command handling |
+| `codehydra/routing/gateway.py` | CLI routing, fallback logic, streaming |
+| `codehydra/routing/claude_session.py` | Persistent `claude` stream-json session |
+| `codehydra/routing/session.py` | Session persistence |
+| `codehydra/cli.py` | Entry point, `--resume` flag, session picker |
+
+**Good first issues:**
+- [ ] `/login agy` should overlay the auth UI, not close the TUI
+- [ ] `/parallel` results panel (show workers side-by-side)
+- [ ] Better rate-limit detection for codex banners
+- [ ] Windows support (currently macOS/Linux only)
+- [ ] Web UI mode via textual-serve improvements
+
 ```bash
 git clone https://github.com/ativin4/codehydra.git
 cd codehydra
-pipx install --editable .   # installs `codehydra` on PATH (same dir as claude / agy)
+pip install -e ".[dev]"
+pytest tests/
 ```
 
-> **No pipx?** `brew install pipx` (macOS) or `pip install pipx`. Editable install means code changes take effect immediately — no reinstall needed.
+Open an issue, drop a comment, or just try it and tell me where it breaks. All feedback welcome.
 
-### 3. Usage
-```bash
-codehydra                   # fresh session
-codehydra --resume          # resume most recent session
-codehydra --resume <id>     # resume a specific session by ID
-```
+---
 
-### 4. Configure Self-Healing
-Add a `.agentrc.toml` to your project root to enable build verification:
-```toml
-[build]
-command = "pytest" # or "npm run build", "go build", etc.
-```
+## License
 
-## 🛠️ Commands
-
-| Command | Action |
-|---------|--------|
-| `/effort <low\|medium\|high>` | Set the effort tier (affects model choice) |
-| `/cli <auto\|claude\|agy\|codex\|ollama>` | Pin the backend CLI for the session |
-| `/model <name\|auto>` | Pin an exact model, bypassing the routing table |
-| `/mode <plan\|yolo>` | `plan` = read-only (no edits/commands); `yolo` = auto-approve everything (default) |
-| `/login <claude\|agy\|codex\|ollama>` | Launch auth flow (or show setup/model info for Ollama) |
-| `/parallel "task 1" "task 2" ...` | Run multiple prompts concurrently (each in its own CLI process), results shown as they complete |
-| `/sessions` | List saved sessions |
-| `/resume [id]` | Resume a session in-TUI (defaults to most recent); also available as `codehydra --resume [id]` at launch |
-| `/cost` | Show per-turn CLI/model/tier and token usage for this session |
-| `/clear` | Reset conversation history |
-| `/exit` | Terminate session |
-
-## 🤖 OSS Model Fallback (Ollama)
-
-Use Ollama as a fallback when your paid subscriptions hit rate limits:
-
-**Local**
-```bash
-# Install: https://ollama.com/download
-ollama pull llama3.2        # or mistral, qwen2.5-coder, deepseek-r1, etc.
-# Then in CodeHydra:
-/cli ollama                 # pin to ollama for the session
-/model llama3.2             # pick any pulled model
-/login ollama               # shows available models + usage hint
-```
-
-**Cloud / remote Ollama instance**
-```bash
-export OLLAMA_HOST=https://your-ollama-host
-# CodeHydra detects it automatically on next start (or /login ollama to refresh)
-```
-
-Ollama is detected on startup and added as the last-tier fallback, activating automatically when claude/agy/codex all fail.
-
-## ⚙️ Configuration (`.agentrc.toml`)
-
-Beyond the `[build]` command, `.agentrc.toml` supports:
-
-- **MCP servers** (`[mcp.servers.<name>]`): declared servers are passed to whichever CLI is active via its native MCP config (claude `--mcp-config`, agy `.agy/settings.json`, codex `-c mcp_servers.*`).
-- **Routing overrides** (`[routing]`): set a custom CLI try-order (`priority`), override the default model per CLI/tier (`[routing.models.<cli>]`), or override the auto-mode model try-order (`[routing.model_map]`).
-
-See the commented examples in `.agentrc.toml`.
-
-## 🤝 Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-## 📄 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT — see [LICENSE](LICENSE).
