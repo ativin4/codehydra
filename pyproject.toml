@@ -37,7 +37,7 @@ Repository = "https://github.com/ativin4/codehydra"
 Issues = "https://github.com/ativin4/codehydra/issues"
 
 [project.scripts]
-codehydra = "codehydra.cli:app"
+codehydra = "codehydra.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["codehydra*"]
