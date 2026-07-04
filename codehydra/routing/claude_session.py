@@ -69,9 +69,13 @@ class ClaudeSession:
     def alive(self) -> bool:
         return self._proc.poll() is None
 
-    def send(self, prompt: str) -> Generator[Tuple[Optional[str], Optional[int]], None, None]:
+    def send(self, prompt: str, cancel_event=None) -> Generator[Tuple[Optional[str], Optional[int]], None, None]:
         """Sends one user turn and yields (text_chunk, total_tokens) until the
-        turn's "result" event arrives. Raises if the process has exited."""
+        turn's "result" event arrives. Raises if the process has exited.
+
+        cancel_event: a threading.Event; when set, the generator raises
+        CancelledError so the caller can kill the session and show a message.
+        """
         if not self.alive():
             raise Exception(f"claude session is no longer running: {self._get_stderr()}")
 
@@ -82,7 +86,18 @@ class ClaudeSession:
 
         thinking_open = False
         while True:
-            line = self._lines.get()
+            # Poll with a short timeout so cancel_event is checked frequently
+            # even when Claude is silently executing a long MCP tool call.
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("cancelled")
+                try:
+                    line = self._lines.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    if not self.alive():
+                        raise Exception(f"claude session ended unexpectedly: {self._get_stderr()}")
+                    continue
             if line is None:
                 raise Exception(f"claude session ended unexpectedly: {self._get_stderr()}")
             line = line.strip()

@@ -1082,6 +1082,9 @@ class HydraApp(App):
         self._update_status()
 
     def _run_prompt_inner(self, prompt: str, media_files: list[Path] | None = None) -> None:
+        # Give gateway a reference to our cancel event so it can interrupt
+        # blocking queue.get() calls inside ClaudeSession (e.g. during MCP tool runs).
+        self.gateway._cancel_event = self._cancel_event
         self.call_from_thread(self._refresh_system_msg)
         turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
@@ -1150,10 +1153,14 @@ class HydraApp(App):
                             self.call_from_thread(md_w.update, response)
                             self.call_from_thread(self._history_scroll.scroll_end, animate=False)
                             last_md_push = now
+            except InterruptedError:
+                # cancel_event fired inside ClaudeSession.send() (e.g. during MCP tool call).
+                if thinking_w is not None:
+                    self.call_from_thread(thinking_w.remove)
+                self.call_from_thread(md_w.update, f"{response}\n\n*[cancelled]*")
+                return
             except Exception as e:
                 if thinking_w is not None:
-                    # Collapse the thinking indicator rather than vanishing it,
-                    # so the user sees the model was mid-thought when it failed.
                     self.call_from_thread(thinking_w.set_classes, "thinking-done")
                     self.call_from_thread(thinking_w.update, "↓ Thinking interrupted")
                 self.call_from_thread(md_w.update, f"**Error:** {e}")

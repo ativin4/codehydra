@@ -117,6 +117,7 @@ class Gateway:
         self._claude_history_len = 0
         self.classifier = Classifier()
         self.last_usage: Optional[Dict] = None
+        self._cancel_event = None  # set by TUI to a threading.Event before each request
 
         # Start the shared HTTP MCP server (once per process) so all CLIs
         # connect to the same long-running server rather than spawning a new
@@ -601,17 +602,16 @@ class Gateway:
         try:
             from codehydra.routing.claude_session import THINKING_START, THINKING_END
             sentinels = {THINKING_START, THINKING_END}
-            for chunk, line_tokens in self._claude_session.send(current_prompt):
+            for chunk, line_tokens in self._claude_session.send(current_prompt, cancel_event=self._cancel_event):
                 if line_tokens is not None:
                     tokens = line_tokens
                 if chunk:
                     if chunk not in sentinels:
                         yielded_any = True
                     yield chunk
-        except GeneratorExit:
-            # User cancelled mid-stream. Kill and nullify the session so the
-            # next turn starts fresh — avoids reading leftover chunks from the
-            # abandoned response off the queue.
+        except (GeneratorExit, InterruptedError):
+            # User cancelled mid-stream (Ctrl+C or cancel_event set).
+            # Kill and nullify the session so the next turn starts fresh.
             self._claude_session.close()
             self._claude_session = None
             self._claude_history_len = 0
