@@ -90,8 +90,11 @@ def choreography(fd: int, demo_dir: Path, child_pid: int) -> None:
 def main() -> None:
     demo_dir = Path(tempfile.mkdtemp(prefix="codehydra_demo_"))
     subprocess.run(["git", "init", "-q"], cwd=demo_dir, check=True)
-    subprocess.run(["git", "-C", str(demo_dir), "commit", "-qm", "init",
-                    "--allow-empty"], check=False, capture_output=True)
+    (demo_dir / ".gitignore").write_text(".codehydra/\n")
+    subprocess.run(["git", "-C", str(demo_dir), "add", ".gitignore"],
+                   check=False, capture_output=True)
+    subprocess.run(["git", "-C", str(demo_dir), "commit", "-qm", "init"],
+                   check=False, capture_output=True)
 
     env = dict(os.environ)
     env["CODEHYDRA_DEMO_SCRIPT"] = str(SCRIPT)
