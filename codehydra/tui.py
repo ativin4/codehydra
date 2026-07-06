@@ -1,3 +1,4 @@
+import os
 import re
 import shlex
 import shutil
@@ -449,7 +450,12 @@ class HydraApp(App):
 
     def __init__(self, resume: str | None = None):
         super().__init__()
-        self.gateway = Gateway()
+        demo_script = os.environ.get("CODEHYDRA_DEMO_SCRIPT")
+        if demo_script:
+            from codehydra.routing.demo_gateway import DemoGateway
+            self.gateway = DemoGateway(Path(demo_script))
+        else:
+            self.gateway = Gateway()
         self.scanner = Scanner()
         self.patcher = Patcher()
         self.compiler = Compiler()
