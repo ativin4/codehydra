@@ -109,7 +109,6 @@ class Gateway:
     def __init__(self):
         self.scavenger = Scavenger()
         self.scavenger.apply_to_env()
-        self.headers = self.scavenger.get_all_headers()
         self.active_providers = self.scavenger.get_active_providers()
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
         self.cli_auth_status[CLI.OLLAMA] = OllamaProvider.is_available()
@@ -654,7 +653,6 @@ class Gateway:
         self.active_providers = self.scavenger.get_active_providers()
         self.cli_auth_status = self.scavenger.get_cli_auth_status()
         self.cli_auth_status[CLI.OLLAMA] = OllamaProvider.is_available()
-        self.headers = self.scavenger.get_all_headers()
 
     def _resolve_cli_and_model(
         self, cli_override: Optional[str], model_override: Optional[str], tier: str

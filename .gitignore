@@ -9,3 +9,5 @@ node_modules/
 .DS_Store
 codehydra.egg-info/
 dist/
+assets/*.cast
+assets/frames/

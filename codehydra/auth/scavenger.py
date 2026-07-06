@@ -129,27 +129,6 @@ class Scavenger:
         if self.get_agy_cli_token(): providers.append("agy_cli")
         return providers
 
-    def get_all_headers(self) -> Dict[str, str]:
-        """Aggregates all found credentials into a header dictionary."""
-        headers = {}
-        
-        agy_token = self.get_agy_cli_token()
-        if agy_token:
-            headers["authorization"] = f"Bearer {agy_token}"
-
-        claude_token = self.get_claude_token()
-        if claude_token:
-            headers["anthropic-session-token"] = claude_token
-
-        copilot_token = self.get_copilot_token()
-        if copilot_token:
-            headers["github-copilot-token"] = copilot_token
-
-        google_hdrs = self.get_google_headers()
-        headers.update(google_hdrs)
-
-        return headers
-
     def get_cli_auth_status(self) -> Dict[str, bool]:
         """Checks whether each underlying CLI (claude, agy, codex) is logged in."""
         status = {"claude": False, "agy": False, "codex": False}
@@ -186,10 +165,5 @@ class Scavenger:
         # strips it from subprocess envs anyway; leave the process env clean.
 
 if __name__ == "__main__":
-    import sys as _sys
     scavenger = Scavenger()
-    if "--dump-tokens" in _sys.argv:
-        print(json.dumps(scavenger.get_all_headers(), indent=2))
-    else:
-        print(f"Active providers: {scavenger.get_active_providers()}")
-        print("Pass --dump-tokens to print raw credential headers.")
+    print(f"Active providers: {scavenger.get_active_providers()}")
