@@ -51,7 +51,7 @@ echo "▶ Building GIF…"
 
 agg \
   --font-size 14 \
-  --theme mocha \
+  --theme dracula \
   --cols 100 \
   --rows 32 \
   --speed 1.5 \

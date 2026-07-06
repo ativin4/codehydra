@@ -433,6 +433,53 @@ class TestGatewayQuotaFallback:
         assert "".join(chunks) == "STREAM_OK"
         assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
 
+    def test_cli_override_stream_mid_response_crash_falls_back(self, monkeypatch):
+        from codehydra.routing.constants import CLI
+
+        gw = self._gateway(monkeypatch)
+        used = []
+        notices = []
+        gw.on_fallback = notices.append
+
+        def fake_stream(cli, *args, **kwargs):
+            used.append(cli)
+            if cli == CLI.CLAUDE:
+                yield "C" * 512
+                raise Exception("claude session crashed")
+            yield "STREAM_OK"
+
+        gw._run_cli_stream = fake_stream
+        chunks = list(gw.request_stream("reply ok", tier="low", cli_override="claude"))
+
+        assert "".join(chunks) == ("C" * 512) + "STREAM_OK"
+        assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
+        assert any("claude failed mid-response" in msg for msg in notices)
+
+    def test_auto_stream_claude_failure_then_codex_rate_limit_tries_agy(self, monkeypatch):
+        from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import RateLimitError
+
+        gw = self._gateway(monkeypatch)
+        used = []
+        notices = []
+        gw.on_fallback = notices.append
+
+        def fake_stream(cli, *args, **kwargs):
+            used.append(cli)
+            if cli == CLI.CLAUDE:
+                raise Exception("claude session crashed")
+            if cli == CLI.CODEX:
+                raise RateLimitError("usage limit")
+            yield "AGY_OK"
+
+        gw._run_cli_stream = fake_stream
+        chunks = list(gw.request_stream("reply ok", tier="low"))
+
+        assert "".join(chunks) == "AGY_OK"
+        assert used[:3] == [CLI.CLAUDE, CLI.CODEX, CLI.AGY]
+        assert any("claude failed" in msg for msg in notices)
+        assert any("codex rate-limited" in msg for msg in notices)
+
     def test_quota_stdout_is_not_treated_as_success(self):
         from codehydra.routing.gateway import Gateway, RateLimitError
 
@@ -441,6 +488,18 @@ class TestGatewayQuotaFallback:
                 "claude",
                 "You've hit your session limit · resets 10:50am (Asia/Calcutta)",
             )
+
+    def test_codex_diagnostics_are_filtered_as_noise(self):
+        from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import Gateway
+
+        assert Gateway._is_cli_noise_line(
+            CLI.CODEX,
+            "2026-07-04T20:20:08.996484Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+        )
+        assert Gateway._is_cli_noise_line(CLI.CODEX, "codex")
+        assert Gateway._is_cli_noise_line(CLI.CODEX, "exec")
+        assert not Gateway._is_cli_noise_line(CLI.CODEX, "I hear the mismatch: this should remain visible.")
 
 
 # ---------------------------------------------------------------------------

@@ -207,6 +207,17 @@ class PromptTextArea(TextArea):
                 self.app._ctrl_c_idle()
 
 
+class DeltaStep(Static):
+    """Muted progress row that remains readable in headless test captures."""
+
+    def __init__(self, message: str, state: str = "info"):
+        self.message = message
+        super().__init__(message, classes=f"delta-step delta-{state}")
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class HydraApp(App):
     """Claude Code-style TUI: scrollable history with a pinned input box."""
 
@@ -266,15 +277,33 @@ class HydraApp(App):
     .thinking-done {
         color: #44475a;
         padding-left: 2;
+        border-left: solid #313244;
         margin-bottom: 0;
     }
-    .route-note {
+
+    /* ── delta/progress rows, visually separate from final answers ───── */
+    .delta-step {
         color: #6272a4;
         text-style: italic;
+        background: #151521;
         padding-left: 2;
         border-left: solid #313244;
         margin-top: 0;
         margin-bottom: 0;
+    }
+    .delta-success {
+        color: #a6e3a1;
+        border-left: solid #3f6f4f;
+    }
+    .delta-error {
+        color: #f38ba8;
+        border-left: solid #7a3345;
+    }
+    .delta-diff {
+        background: #14141f;
+        border-left: solid #45475a;
+        margin-top: 0;
+        margin-bottom: 1;
     }
 
     /* ── Markdown link/code colours ─────────────────────────────── */
@@ -383,7 +412,7 @@ class HydraApp(App):
             return
         self._cancel_event.set()
         self._loop_stop.set()
-        self._add_message(Text("⏹ Cancelling…", style="#44475a"))
+        self._add_delta_step("Cancelling…")
 
     def _ctrl_c_idle(self) -> None:
         """Ctrl+C with no active request and an empty input box: quit, but guard
@@ -614,8 +643,11 @@ class HydraApp(App):
         self._history_scroll.scroll_end(animate=False)
         return w
 
+    def _add_delta_step(self, msg: str, state: str = "info") -> Widget:
+        return self._add_message(DeltaStep(msg, state))
+
     def _add_route_note(self, msg: str) -> Widget:
-        return self._add_message(Static(msg, classes="route-note"))
+        return self._add_delta_step(msg)
 
     @staticmethod
     def _snapshot_git_state() -> dict:
@@ -702,7 +734,10 @@ class HydraApp(App):
         if len(full_diff) > 6000:
             full_diff = full_diff[:6000] + "\n… (truncated)"
 
-        self.call_from_thread(self._add_message, Markdown(f"```diff\n{full_diff}\n```"))
+        self.call_from_thread(
+            self._add_message,
+            Markdown(f"```diff\n{full_diff}\n```", classes="delta-diff"),
+        )
 
     def _render_history(self) -> None:
         history = self._history_scroll
@@ -1319,13 +1354,13 @@ class HydraApp(App):
         turns = [m for m in self.history if m["role"] != Role.SYSTEM]
         history_chars = sum(len(m["content"]) for m in turns)
         if history_chars > self._AUTO_COMPACT_CHARS:
-            self.call_from_thread(self._add_message, Text("↩ Auto-compacting history…", style="#44475a"))
+            self.call_from_thread(self._add_delta_step, "↩ Auto-compacting history…")
             try:
                 msg = self._do_compact()
                 if msg:
-                    self.call_from_thread(self._add_message, Text(f"↩ {msg}", style="#44475a"))
+                    self.call_from_thread(self._add_delta_step, f"↩ {msg}", "success")
             except Exception as e:
-                self.call_from_thread(self._add_message, Text(f"Auto-compact failed: {e}", style="red"))
+                self.call_from_thread(self._add_delta_step, f"Auto-compact failed: {e}", "error")
         # Throttle Markdown re-renders: only push UI update every 100ms to avoid
         # re-parsing the full markdown tree on every streamed token.
         _MD_INTERVAL = 0.1  # seconds
@@ -1439,7 +1474,7 @@ class HydraApp(App):
             if usage:
                 display_cli = _CLI_DISPLAY.get(usage["cli"], usage["cli"])
                 tag = f"[{display_cli}/{usage['model'].split('/')[-1]}]"
-                self.call_from_thread(self._add_message, Text(tag, style="dim"))
+                self.call_from_thread(self._add_delta_step, tag)
             self.call_from_thread(self._update_status)
 
             # Always record the user turn. Only record the assistant turn if
@@ -1457,17 +1492,17 @@ class HydraApp(App):
             if not patched_files:
                 return
 
-            self.call_from_thread(self._add_message, Text(f"Applied patches to: {', '.join(patched_files)}", style="green"))
+            self.call_from_thread(self._add_delta_step, f"Applied patches to: {', '.join(patched_files)}", "success")
             exit_code, output = self.compiler.run_build()
             if exit_code == 0:
-                self.call_from_thread(self._add_message, Text("✅ Build successful!", style="bold green"))
+                self.call_from_thread(self._add_delta_step, "Build successful", "success")
                 return
 
             attempt_num = _build_attempt + 1
             if attempt_num >= _MAX_BUILD_RETRIES:
-                self.call_from_thread(self._add_message, Text(f"❌ Build failed after {attempt_num} attempts. Stopping.", style="bold red"))
+                self.call_from_thread(self._add_delta_step, f"Build failed after {attempt_num} attempts. Stopping.", "error")
                 return
-            self.call_from_thread(self._add_message, Text(f"❌ Build failed (exit {exit_code}). Feeding back to Hydra… (attempt {attempt_num}/{_MAX_BUILD_RETRIES})", style="bold red"))
+            self.call_from_thread(self._add_delta_step, f"Build failed (exit {exit_code}). Feeding back to Hydra… (attempt {attempt_num}/{_MAX_BUILD_RETRIES})", "error")
             prompt = f"The build failed with the following error:\n```\n{output}\n```\nPlease fix the code."
 
     # Auto-compact when non-system history exceeds this many characters.
@@ -1515,15 +1550,15 @@ class HydraApp(App):
         try:
             turns = [m for m in self.history if m["role"] != Role.SYSTEM]
             if len(turns) < 6:
-                self.call_from_thread(self._add_message, Text("Not enough history to compact.", style="dim"))
+                self.call_from_thread(self._add_delta_step, "Not enough history to compact.")
                 return
-            self.call_from_thread(self._add_message, Text("Compacting history…", style="#44475a"))
+            self.call_from_thread(self._add_delta_step, "Compacting history…")
             try:
                 msg = self._do_compact()
             except Exception as e:
-                self.call_from_thread(self._add_message, Text(f"Compact failed: {e}", style="red"))
+                self.call_from_thread(self._add_delta_step, f"Compact failed: {e}", "error")
                 return
-            self.call_from_thread(self._add_message, Text(msg or "Nothing to compact.", style="green"))
+            self.call_from_thread(self._add_delta_step, msg or "Nothing to compact.", "success")
         finally:
             self.call_from_thread(self._dec_workers)
 
@@ -1531,12 +1566,12 @@ class HydraApp(App):
     def _run_search(self, query: str) -> None:
         self.call_from_thread(self._inc_workers)
         try:
-            self.call_from_thread(self._add_message, Text(f"Searching: {query}…", style="#44475a"))
+            self.call_from_thread(self._add_delta_step, f"Searching: {query}…")
             try:
                 results = search(query)
                 formatted = format_results(results)
             except Exception as e:
-                self.call_from_thread(self._add_message, Text(f"Search failed: {e}", style="red"))
+                self.call_from_thread(self._add_delta_step, f"Search failed: {e}", "error")
                 return
             self.call_from_thread(self._add_message, Markdown(formatted))
             content = f"[Web search results for: {query}]\n{formatted}"
@@ -1808,17 +1843,17 @@ class HydraApp(App):
 
         diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
         if not diff.strip():
-            self.call_from_thread(self._add_message, Text("Staging all changes…", style="#44475a"))
+            self.call_from_thread(self._add_delta_step, "Staging all changes…")
             subprocess.run(["git", "add", "-A"], capture_output=True)
             diff = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True).stdout
             if not diff.strip():
-                self.call_from_thread(self._add_message, Text("Nothing to commit.", style="dim"))
+                self.call_from_thread(self._add_delta_step, "Nothing to commit.")
                 return
 
         if message_override:
             commit_msg = message_override
         else:
-            self.call_from_thread(self._add_message, Text("Generating commit message…", style="#44475a"))
+            self.call_from_thread(self._add_delta_step, "Generating commit message…")
             prompt = (
                 "Write a conventional commit message for this diff.\n"
                 "Format: type(scope): short description\n"
@@ -1830,21 +1865,21 @@ class HydraApp(App):
             auth = self.gateway.cli_auth_status
             best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
             if not best_cli:
-                self.call_from_thread(self._add_message, Text("No CLI available to generate message.", style="red"))
+                self.call_from_thread(self._add_delta_step, "No CLI available to generate message.", "error")
                 return
             try:
                 commit_msg = self.gateway.request(
                     prompt, tier="low", history=[], cli_override=best_cli, mode=Mode.PLAN,
                 ).strip().strip('"').strip("'")
             except Exception as e:
-                self.call_from_thread(self._add_message, Text(f"Message generation failed: {e}", style="red"))
+                self.call_from_thread(self._add_delta_step, f"Message generation failed: {e}", "error")
                 return
 
         result = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
         if result.returncode == 0:
-            self.call_from_thread(self._add_message, Text(f"✓ {commit_msg}", style="green"))
+            self.call_from_thread(self._add_delta_step, f"Committed: {commit_msg}", "success")
         else:
-            self.call_from_thread(self._add_message, Text(f"✗ {result.stderr.strip()}", style="red"))
+            self.call_from_thread(self._add_delta_step, result.stderr.strip(), "error")
 
     @work(thread=True, exclusive=True, group="git")
     def _run_pr(self, title_override: str = "") -> None:
@@ -1870,14 +1905,14 @@ class HydraApp(App):
             ["git", "log", "main..HEAD", "--oneline"], capture_output=True, text=True,
         ).stdout.strip()
         if not log:
-            self.call_from_thread(self._add_message, Text("No commits ahead of main.", style="dim"))
+            self.call_from_thread(self._add_delta_step, "No commits ahead of main.")
             return
 
         diff_stat = subprocess.run(
             ["git", "diff", "main...HEAD", "--stat"], capture_output=True, text=True,
         ).stdout.strip()
 
-        self.call_from_thread(self._add_message, Text("Generating PR description…", style="#44475a"))
+        self.call_from_thread(self._add_delta_step, "Generating PR description…")
         prompt = (
             "Write a GitHub pull request title and description.\n\n"
             f"Branch: {branch}\nCommits:\n{log}\nFiles changed:\n{diff_stat}\n\n"
@@ -1888,14 +1923,14 @@ class HydraApp(App):
         auth = self.gateway.cli_auth_status
         best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
         if not best_cli:
-            self.call_from_thread(self._add_message, Text("No CLI available to generate description.", style="red"))
+            self.call_from_thread(self._add_delta_step, "No CLI available to generate description.", "error")
             return
         try:
             raw = self.gateway.request(
                 prompt, tier="low", history=[], cli_override=best_cli, mode=Mode.PLAN,
             ).strip()
         except Exception as e:
-            self.call_from_thread(self._add_message, Text(f"Description generation failed: {e}", style="red"))
+            self.call_from_thread(self._add_delta_step, f"Description generation failed: {e}", "error")
             return
 
         title = title_override
@@ -1911,10 +1946,10 @@ class HydraApp(App):
         if not title:
             title = branch.replace("-", " ").replace("_", " ")
 
-        self.call_from_thread(self._add_message, Text(f"Pushing {branch}…", style="#44475a"))
+        self.call_from_thread(self._add_delta_step, f"Pushing {branch}…")
         push = subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, text=True)
         if push.returncode != 0:
-            self.call_from_thread(self._add_message, Text(f"Push failed: {push.stderr.strip()}", style="red"))
+            self.call_from_thread(self._add_delta_step, f"Push failed: {push.stderr.strip()}", "error")
             return
 
         result = subprocess.run(
