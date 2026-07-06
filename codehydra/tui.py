@@ -14,12 +14,11 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widget import Widget
-from textual.widgets import TextArea, Markdown, Static, ListView, ListItem, Label
+from textual.widgets import Collapsible, TextArea, Markdown, Static, ListView, ListItem, Label
 
 from codehydra.routing.claude_session import THINKING_END, THINKING_START
-from codehydra.routing.gateway import STREAM_RESET
 from codehydra.routing.constants import CLI, Mode, Role, Tier
-from codehydra.routing.gateway import Gateway
+from codehydra.routing.gateway import Gateway, STREAM_RESET
 from codehydra.routing.oss_provider import OllamaProvider
 from codehydra.routing.session import SessionManager
 from codehydra.tools.compiler import Compiler
@@ -157,6 +156,7 @@ class PromptTextArea(TextArea):
                     lv.action_cursor_up()
                 else:
                     lv.action_cursor_down()
+                self.app._autocomplete_navigated = True
                 return
             row, _ = self.cursor_location
             if event.key == "up" and row == 0:
@@ -170,8 +170,15 @@ class PromptTextArea(TextArea):
         elif event.key == "enter":
             event.prevent_default()
             event.stop()
-            # Popup open: Enter accepts the highlighted item instead of submitting
-            if self.app._autocomplete_visible() and self.app._accept_autocomplete():
+            # Enter accepts the popup selection only after the user has
+            # arrow-navigated to it; otherwise it submits the typed text
+            # (so exact commands like "/login" aren't hijacked by longer
+            # completions such as "/login claude").
+            if (
+                self.app._autocomplete_visible()
+                and getattr(self.app, "_autocomplete_navigated", False)
+                and self.app._accept_autocomplete()
+            ):
                 return
             self.app.action_submit_input()
         elif event.key in ("ctrl+enter", "shift+enter"):
@@ -220,6 +227,55 @@ class DeltaStep(Static):
 
     def __str__(self) -> str:
         return self.message
+
+
+def _split_diff_by_file(diff_text: str) -> list[tuple[str, str]]:
+    """Splits `git diff` output into (path, file_section) tuples."""
+    files: list[tuple[str, str]] = []
+    current_path: str | None = None
+    current_lines: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            if current_path and current_lines:
+                files.append((current_path, "\n".join(current_lines)))
+            current_path = line.split(" b/")[-1]
+            current_lines = [line]
+        elif current_path:
+            current_lines.append(line)
+    if current_path and current_lines:
+        files.append((current_path, "\n".join(current_lines)))
+    return files
+
+
+def _count_changes(file_diff: str) -> tuple[int, int]:
+    """Returns (added, deleted) line counts, excluding +++/--- headers."""
+    adds = dels = 0
+    for line in file_diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            adds += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            dels += 1
+    return adds, dels
+
+
+def _style_diff_lines(file_diff: str, max_lines: int = 400) -> Text:
+    """Renders one file's diff with add/remove/hunk line colouring."""
+    body = Text()
+    lines = file_diff.splitlines()
+    for line in lines[:max_lines]:
+        if line.startswith("+++") or line.startswith("---") or line.startswith("diff --git") or line.startswith("index "):
+            body.append(line + "\n", style="dim #6272a4")
+        elif line.startswith("+"):
+            body.append(line + "\n", style="#a6e3a1 on #1e2e1e")
+        elif line.startswith("-"):
+            body.append(line + "\n", style="#f38ba8 on #2e1e24")
+        elif line.startswith("@@"):
+            body.append(line + "\n", style="bold #89b4fa")
+        else:
+            body.append(line + "\n", style="#6272a4")
+    if len(lines) > max_lines:
+        body.append(f"… {len(lines) - max_lines} more lines (truncated)", style="dim")
+    return body
 
 
 class HydraApp(App):
@@ -308,6 +364,24 @@ class HydraApp(App):
         border-left: solid #45475a;
         margin-top: 0;
         margin-bottom: 1;
+    }
+    .diff-file {
+        background: #14141f;
+        border: none;
+        border-left: solid #45475a;
+        padding: 0;
+        margin: 0;
+    }
+    .diff-file CollapsibleTitle {
+        color: #89b4fa;
+        background: #1a1a2e;
+        padding: 0 1;
+    }
+    .diff-file CollapsibleTitle:hover {
+        background: #24243a;
+    }
+    .diff-body {
+        padding: 0 1;
     }
 
     /* ── Markdown link/code colours ─────────────────────────────── */
@@ -526,6 +600,7 @@ class HydraApp(App):
             pass
 
     def _refresh_autocomplete(self, prefix: str) -> None:
+        self._autocomplete_navigated = False
         all_commands = SLASH_COMMANDS + [f"/skill {n}" for n in _skill_names()]
         lower = prefix.lower()
         matches = [c for c in all_commands if c.startswith(lower) and c != lower][:6]
@@ -549,7 +624,7 @@ class HydraApp(App):
             self._hide_autocomplete()
             return True
         label = item.query_one(Label)
-        text = str(label.renderable)
+        text = str(label.content)
         area = self.query_one("#input-area", TextArea)
         lines = area.text.split("\n")
         lines[0] = text
@@ -685,63 +760,57 @@ class HydraApp(App):
         if after_status == before["status"] and after_diff == before["diff"]:
             return
 
-        parts: list[str] = []
+        file_diffs: list[tuple[str, str]] = []
 
         # For tracked modifications: show only file sections not present before.
         if after_diff != before["diff"]:
-            if not before["diff"].strip():
-                # No pre-existing uncommitted changes — safe to show all.
-                parts.append(after_diff.strip())
-            else:
-                # Extract only newly-changed file sections (not pre-existing ones).
-                before_file_paths: set[str] = set()
+            before_file_paths: set[str] = set()
+            if before["diff"].strip():
                 for line in before["diff"].splitlines():
                     if line.startswith("diff --git "):
                         before_file_paths.add(line.split(" b/")[-1])
-
-                current_header: str | None = None
-                current_path: str | None = None
-                current_lines: list[str] = []
-
-                def _flush():
-                    if current_path and current_path not in before_file_paths and current_lines:
-                        parts.append("\n".join(current_lines))
-
-                for line in after_diff.splitlines():
-                    if line.startswith("diff --git "):
-                        _flush()
-                        current_header = line
-                        current_path = line.split(" b/")[-1]
-                        current_lines = [line]
-                    else:
-                        current_lines.append(line)
-                _flush()
+            file_diffs.extend(
+                (path, text) for path, text in _split_diff_by_file(after_diff)
+                if path not in before_file_paths
+            )
 
         # New untracked files — render as full-addition diff blocks.
         for path in sorted(new_files):
             try:
                 fp = Path.cwd() / path
                 if not fp.exists() or fp.stat().st_size > 50_000:
-                    parts.append(f"--- /dev/null\n+++ b/{path}\n@@ New file @@")
+                    file_diffs.append((path, "@@ New file @@"))
                     continue
                 lines = fp.read_text(errors="replace").splitlines()
-                header = f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@"
+                header = f"@@ -0,0 +1,{len(lines)} @@"
                 body = "\n".join(f"+{l}" for l in lines)
-                parts.append(f"{header}\n{body}")
+                file_diffs.append((path, f"{header}\n{body}"))
             except Exception:
-                parts.append(f"--- /dev/null\n+++ b/{path}\n@@ New file @@")
+                file_diffs.append((path, "@@ New file @@"))
 
-        if not parts:
+        if not file_diffs:
             return
 
-        full_diff = "\n\n".join(parts)
-        if len(full_diff) > 6000:
-            full_diff = full_diff[:6000] + "\n… (truncated)"
+        self.call_from_thread(self._mount_diff_view, file_diffs)
 
-        self.call_from_thread(
-            self._add_message,
-            Markdown(f"```diff\n{full_diff}\n```", classes="delta-diff"),
-        )
+    _DIFF_MAX_FILES = 12
+    _DIFF_MAX_LINES_PER_FILE = 400
+
+    def _mount_diff_view(self, file_diffs: list[tuple[str, str]]) -> None:
+        """Mount one collapsible, line-styled panel per changed file."""
+        n = len(file_diffs)
+        self._add_delta_step(f"⎇ {n} file{'s' if n != 1 else ''} changed")
+        for idx, (path, diff_text) in enumerate(file_diffs[: self._DIFF_MAX_FILES]):
+            adds, dels = _count_changes(diff_text)
+            body = _style_diff_lines(diff_text, max_lines=self._DIFF_MAX_LINES_PER_FILE)
+            self._add_message(Collapsible(
+                Static(body, classes="diff-body"),
+                title=f"{path}  +{adds} −{dels}",
+                collapsed=(idx >= 3 or n > 5),
+                classes="diff-file",
+            ))
+        if n > self._DIFF_MAX_FILES:
+            self._add_delta_step(f"… {n - self._DIFF_MAX_FILES} more files not shown")
 
     def _render_history(self) -> None:
         history = self._history_scroll
