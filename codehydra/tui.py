@@ -17,6 +17,7 @@ from textual.widget import Widget
 from textual.widgets import TextArea, Markdown, Static, ListView, ListItem, Label
 
 from codehydra.routing.claude_session import THINKING_END, THINKING_START
+from codehydra.routing.gateway import STREAM_RESET
 from codehydra.routing.constants import CLI, Mode, Role, Tier
 from codehydra.routing.gateway import Gateway
 from codehydra.routing.oss_provider import OllamaProvider
@@ -146,22 +147,32 @@ class PromptTextArea(TextArea):
     """Prompt input where Enter submits and Ctrl+Enter / Shift+Enter adds a newline."""
 
     def on_key(self, event) -> None:
-        if event.key == "up":
+        if event.key in ("up", "down"):
+            if self.app._autocomplete_visible():
+                # Popup open: up/down move its selection, not prompt history
+                event.prevent_default()
+                event.stop()
+                lv = self.app.query_one("#autocomplete", ListView)
+                if event.key == "up":
+                    lv.action_cursor_up()
+                else:
+                    lv.action_cursor_down()
+                return
             row, _ = self.cursor_location
-            if row == 0:
+            if event.key == "up" and row == 0:
                 event.prevent_default()
                 event.stop()
                 self.app.action_history_up()
-        elif event.key == "down":
-            row, _ = self.cursor_location
-            last_row = self.text.count("\n")
-            if row == last_row:
+            elif event.key == "down" and row == self.text.count("\n"):
                 event.prevent_default()
                 event.stop()
                 self.app.action_history_down()
         elif event.key == "enter":
             event.prevent_default()
             event.stop()
+            # Popup open: Enter accepts the highlighted item instead of submitting
+            if self.app._autocomplete_visible() and self.app._accept_autocomplete():
+                return
             self.app.action_submit_input()
         elif event.key in ("ctrl+enter", "shift+enter"):
             event.prevent_default()
@@ -173,17 +184,10 @@ class PromptTextArea(TextArea):
             # If autocomplete popup is visible, accept highlighted item
             if not self.app._accept_autocomplete():
                 self.app._complete_at_ref()
-        elif event.key in ("up", "down") and self.app._autocomplete_visible():
-            # Let up/down navigate the popup instead of prompt history
-            event.prevent_default()
-            event.stop()
-            lv = self.app.query_one("#autocomplete", ListView)
-            if event.key == "up":
-                lv.action_cursor_up()
-            else:
-                lv.action_cursor_down()
-            return
         elif event.key == "escape":
+            if self.app._autocomplete_visible():
+                event.prevent_default()
+                event.stop()
             self.app._hide_autocomplete()
         elif event.key == "ctrl+e":
             event.prevent_default()
@@ -903,7 +907,10 @@ class HydraApp(App):
             self.exit()
         elif cmd == "clear":
             self.history = [{"role": Role.SYSTEM, "content": self.system_msg}]
+            self.usage_log = []
             self._history_scroll.remove_children()
+            self.gateway.reset_session()
+            self._update_status()
         elif cmd == "compact":
             self._run_compact()
         elif cmd.startswith("login"):
@@ -1330,7 +1337,7 @@ class HydraApp(App):
                 break
             iteration += 1
             label = f"♻ Loop iteration {iteration}" + (f"/{count}" if count != -1 else "")
-            self.call_from_thread(self._add_message, Text(label, style="dim cyan"))
+            self.call_from_thread(self._add_delta_step, label)
             self._cancel_event.clear()
             self.call_from_thread(self._set_request_active, True)
             try:
@@ -1339,7 +1346,7 @@ class HydraApp(App):
                 self.call_from_thread(self._set_request_active, False)
             if self._cancel_event.is_set():
                 break
-        self.call_from_thread(self._add_message, Text(f"♻ Loop done ({iteration} iteration{'s' if iteration != 1 else ''})", style="dim cyan"))
+        self.call_from_thread(self._add_delta_step, f"♻ Loop done ({iteration} iteration{'s' if iteration != 1 else ''})", "success")
 
     def _set_request_active(self, active: bool) -> None:
         self._request_active = active
@@ -1411,6 +1418,19 @@ class HydraApp(App):
                             self.call_from_thread(thinking_w.remove)
                         self.call_from_thread(md_w.update, f"{response}\n\n*[cancelled]*")
                         return
+                    if chunk == STREAM_RESET:
+                        # Mid-stream fallback: partial text from the failed CLI
+                        # is stale — wipe it and show the waiting indicator again.
+                        response = ""
+                        in_thinking = False
+                        thinking_chars = 0
+                        first_token = False
+                        self.call_from_thread(md_w.update, "")
+                        if thinking_w is None:
+                            thinking_w = self.call_from_thread(self._mount_thinking_widget, md_w)
+                        thinking_start = time.time()
+                        self.call_from_thread(thinking_w.update, "⟳ Thinking… 0s")
+                        continue
                     if chunk == THINKING_START:
                         in_thinking = True
                         thinking_start = time.time()
@@ -1593,9 +1613,7 @@ class HydraApp(App):
         import re as _re
 
         # Phase 1 — spec generation with a high-tier model in plan mode.
-        self.call_from_thread(self._add_message, Text(
-            "SDD phase 1: generating spec…", style="#44475a"
-        ))
+        self.call_from_thread(self._add_delta_step, "SDD phase 1: generating spec…")
         spec_prompt = (
             "You are a software architect. Create a concise spec for this task.\n\n"
             f"TASK: {task}\n\n"
@@ -1615,7 +1633,7 @@ class HydraApp(App):
         auth = self.gateway.cli_auth_status
         best_cli = next((c for c in (CLI.CLAUDE, CLI.AGY, CLI.CODEX) if auth.get(c)), None)
         if not best_cli:
-            self.call_from_thread(self._add_message, Text("No CLI available.", style="red"))
+            self.call_from_thread(self._add_delta_step, "No CLI available.", "error")
             return
         try:
             spec = self.gateway.request(
@@ -1626,7 +1644,7 @@ class HydraApp(App):
                 mode=Mode.PLAN,
             ).strip()
         except Exception as e:
-            self.call_from_thread(self._add_message, Text(f"Spec generation failed: {e}", style="red"))
+            self.call_from_thread(self._add_delta_step, f"Spec generation failed: {e}", "error")
             return
 
         self.call_from_thread(self._add_message, Markdown(spec))
@@ -1634,14 +1652,12 @@ class HydraApp(App):
         # Phase 2 — parse TASK lines from spec.
         task_lines = _re.findall(r"^TASK \d+:\s*(.+)$", spec, _re.MULTILINE)
         if not task_lines:
-            self.call_from_thread(self._add_message, Text(
-                "No TASK lines found in spec output. Try rephrasing or use /parallel.", style="#6272a4"
-            ))
+            self.call_from_thread(self._add_delta_step,
+                "No TASK lines found in spec output. Try rephrasing or use /parallel.", "error")
             return
 
-        self.call_from_thread(self._add_message, Text(
-            f"SDD phase 2: running {len(task_lines)} parallel agents…", style="#44475a"
-        ))
+        self.call_from_thread(self._add_delta_step,
+            f"SDD phase 2: running {len(task_lines)} parallel agents…")
 
         # Phase 3 — parallel implementation (each task gets its own Gateway instance).
         parent_auth = self.gateway.cli_auth_status
@@ -1666,13 +1682,13 @@ class HydraApp(App):
                 try:
                     result, usage = future.result()
                 except Exception as e:
-                    self.call_from_thread(self._add_message, Text(f"❌ {t[:60]}: {e}", style="red"))
+                    self.call_from_thread(self._add_delta_step, f"❌ {t[:60]}: {e}", "error")
                     continue
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
                 self.call_from_thread(self._add_message, Static(f"  {t[:80]}", classes="user-msg"))
                 self.call_from_thread(self._add_message, Markdown(result))
                 if tag:
-                    self.call_from_thread(self._add_message, Text(tag, style="dim"))
+                    self.call_from_thread(self._add_delta_step, tag)
                 if usage:
                     self.usage_log.append(usage)
 
@@ -1713,14 +1729,14 @@ class HydraApp(App):
                 try:
                     result, usage = future.result()
                 except Exception as e:
-                    self.call_from_thread(self._add_message, Text(f"❌ {prompt[:60]}: {e}", style="red"))
+                    self.call_from_thread(self._add_delta_step, f"❌ {prompt[:60]}: {e}", "error")
                     continue
 
                 tag = f"[{usage['cli']}/{usage['model'].split('/')[-1]}]" if usage else ""
                 self.call_from_thread(self._add_message, Static(f"  {prompt[:60]}", classes="user-msg"))
                 self.call_from_thread(self._add_message, Markdown(result))
                 if tag:
-                    self.call_from_thread(self._add_message, Text(tag, style="dim"))
+                    self.call_from_thread(self._add_delta_step, tag)
                 self.history.append({"role": Role.USER, "content": prompt})
                 self.history.append({"role": Role.ASSISTANT, "content": result})
                 if usage:
@@ -1764,10 +1780,7 @@ class HydraApp(App):
                 try:
                     result, usage, elapsed = future.result()
                 except Exception as e:
-                    self.call_from_thread(
-                        self._add_message,
-                        Text(f"❌ {cli}: {e}", style="red"),
-                    )
+                    self.call_from_thread(self._add_delta_step, f"❌ {cli}: {e}", "error")
                     continue
 
                 results_by_cli[cli] = result

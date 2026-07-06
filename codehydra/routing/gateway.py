@@ -34,6 +34,11 @@ class RateLimitError(Exception):
     """Raised when a backend reports quota/rate-limit exhaustion."""
 
 
+# Yielded by request_stream() when a mid-stream fallback restarts the answer:
+# everything streamed before this sentinel is stale and should be discarded.
+STREAM_RESET = "\x00__HYDRA_STREAM_RESET__\x00"
+
+
 class Gateway:
     # Default auto-mode model try-order per tier. claude/codex use rolling
     # aliases ("sonnet"/"haiku"/"opus", "default") that auto-resolve to the
@@ -648,6 +653,13 @@ class Gateway:
             raise Exception(f"claude CLI returned no usable output{detail}")
         self._record_usage(CLI.CLAUDE, model, "", tier, tokens=tokens)
 
+    def reset_session(self) -> None:
+        """Drops the persistent Claude subprocess so cleared context isn't retained."""
+        if self._claude_session is not None:
+            self._claude_session.close()
+            self._claude_session = None
+        self._claude_history_len = 0
+
     def refresh_auth(self) -> None:
         """Re-reads all credentials after a login flow completes."""
         self.active_providers = self.scavenger.get_active_providers()
@@ -1041,6 +1053,9 @@ class Gateway:
                     try:
                         fb_buf, fb_gen = _try_stream(fb_cli, fb_model)
                         remaining = fallback_models[idx + 1:]
+                        # Probe succeeded: tell the consumer to drop the
+                        # partial text from the failed CLI before we restart.
+                        yield STREAM_RESET
                         yield from _yield_stream(fb_buf, fb_gen, fb_cli, remaining)
                         return
                     except InterruptedError:

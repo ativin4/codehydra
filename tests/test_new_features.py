@@ -435,6 +435,7 @@ class TestGatewayQuotaFallback:
 
     def test_cli_override_stream_mid_response_crash_falls_back(self, monkeypatch):
         from codehydra.routing.constants import CLI
+        from codehydra.routing.gateway import STREAM_RESET
 
         gw = self._gateway(monkeypatch)
         used = []
@@ -451,9 +452,27 @@ class TestGatewayQuotaFallback:
         gw._run_cli_stream = fake_stream
         chunks = list(gw.request_stream("reply ok", tier="low", cli_override="claude"))
 
-        assert "".join(chunks) == ("C" * 512) + "STREAM_OK"
+        # Partial output from the failed CLI is followed by a reset sentinel,
+        # then the fallback CLI's full answer.
+        assert chunks.count(STREAM_RESET) == 1
+        reset_idx = chunks.index(STREAM_RESET)
+        assert "".join(chunks[:reset_idx]) == "C" * 512
+        assert "".join(chunks[reset_idx + 1:]) == "STREAM_OK"
         assert used[:2] == [CLI.CLAUDE, CLI.CODEX]
         assert any("claude failed mid-response" in msg for msg in notices)
+
+    def test_stream_reset_not_emitted_without_mid_stream_failure(self, monkeypatch):
+        from codehydra.routing.gateway import STREAM_RESET
+
+        gw = self._gateway(monkeypatch)
+
+        def fake_stream(cli, *args, **kwargs):
+            yield "STREAM_OK"
+
+        gw._run_cli_stream = fake_stream
+        chunks = list(gw.request_stream("reply ok", tier="low", cli_override="claude"))
+        assert STREAM_RESET not in chunks
+        assert "".join(chunks) == "STREAM_OK"
 
     def test_auto_stream_claude_failure_then_codex_rate_limit_tries_agy(self, monkeypatch):
         from codehydra.routing.constants import CLI
