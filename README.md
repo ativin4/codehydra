@@ -4,8 +4,9 @@
 
 > Session expired mid-task. Again. You're on Claude Pro, Codex, and Agy — and none of them last the whole day. You manually copy your context, paste it into the next one, and wait hours for the reset. CodeHydra fixes this.
 
-<!-- demo gif goes here -->
-<!-- ![CodeHydra demo](assets/demo.gif) -->
+![CodeHydra demo](assets/demo.gif)
+
+*Slash autocomplete, thinking timer, per-file diff view, and mid-stream fallback from Claude to Codex — [full video](assets/demo_v2.mp4). Recorded with `bash record_demo.sh` (scripted, no live API calls).*
 
 [![Tests](https://github.com/ativin4/codehydra/actions/workflows/test.yml/badge.svg)](https://github.com/ativin4/codehydra/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

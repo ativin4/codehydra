@@ -1,66 +1,48 @@
 #!/usr/bin/env bash
-# Record a CodeHydra demo GIF for README / LinkedIn
-# Requirements: asciinema, agg  (brew install asciinema agg)
+# Record the scripted CodeHydra demo — fully automated, no live API calls.
+# Requirements: asciinema, agg, ffmpeg  (brew install asciinema agg ffmpeg)
 #
 # Usage:  bash record_demo.sh
 #
-# The script starts recording, opens codehydra, and gives you a cue card.
-# You type the demo live — keeps it natural. Stop with /exit, GIF auto-builds.
+# demo_driver.py spawns codehydra in a throwaway git repo with the canned
+# DemoGateway script (assets/demo_script.json) and feeds a choreographed
+# keystroke sequence showcasing: slash autocomplete, thinking spinner,
+# per-file diff view, mid-stream fallback recovery, and /cost.
+#
+# Outputs: assets/demo.gif (README) and assets/demo_v2.mp4 (posts).
 
 set -e
+cd "$(dirname "$0")"
 
 CAST=assets/demo.cast
 GIF=assets/demo.gif
+MP4=assets/demo_v2.mp4
+PY=.venv/bin/python
 mkdir -p assets
 
-cat <<'CUE'
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CODEHYDRA DEMO — CUE CARD
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1. codehydra starts — let the header appear (~2s)
-  2. Type this prompt and press Enter:
-       Explain async/await vs threads in Python. Be concise.
-  3. Wait for the full response to stream in
-  4. Type:  /status   (shows which CLIs are authenticated)
-  5. Press: Ctrl+Y    (copies last response — confirmation appears)
-  6. Type:  /exit
-  7. Recording stops → GIF builds automatically
-
-  Terminal will resize to 100×32 for the recording.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CUE
-
-echo ""
-read -r -p "Ready? Press Enter to start recording (Ctrl+C to abort)…" _
-
-# Resize terminal for consistent GIF output
-printf '\e[8;32;100t'
-sleep 0.5
-
-echo "▶ Recording started. Follow the cue card above."
-echo ""
-
+echo "▶ Recording scripted demo (~50s)…"
 asciinema rec \
   --overwrite \
-  --title "CodeHydra — auto-fallback TUI for Claude/Agy/Codex" \
-  --command "codehydra" \
+  --cols 100 --rows 32 \
+  --title "CodeHydra — one TUI for Claude, Gemini & Codex with auto-fallback" \
+  --command "$PY demo_driver.py" \
   "$CAST"
 
-echo ""
 echo "▶ Building GIF…"
-
 agg \
   --font-size 14 \
   --theme dracula \
   --cols 100 \
   --rows 32 \
-  --speed 1.5 \
   "$CAST" "$GIF"
 
+echo "▶ Building MP4…"
+ffmpeg -y -loglevel error -i "$GIF" \
+  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+  -c:v libx264 -preset slow -crf 18 \
+  -movflags +faststart -pix_fmt yuv420p \
+  "$MP4"
+
 echo ""
-echo "✓ Done:  $GIF"
-echo ""
-echo "Next steps:"
-echo "  1. Trim the cast if needed:  asciinema cut --start 2 --end 60 $CAST > assets/demo_trimmed.cast"
-echo "  2. Drop the GIF into README: ![demo](assets/demo.gif)"
-echo "  3. Upload the GIF directly to LinkedIn post for autoplay"
+echo "✓ $GIF"
+echo "✓ $MP4"
