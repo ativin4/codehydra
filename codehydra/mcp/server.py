@@ -193,6 +193,35 @@ def stop_background_task(task_id: str) -> dict:
     return {"status": "stopped"}
 
 
+# ---------- Plugins (auto-discovered via entry_points) ----------
+def _load_plugins() -> None:
+    """Discover and register all installed CodeHydra plugins.
+
+    Plugins declare an entry point in ``[project.entry-points."codehydra.plugins"]``
+    pointing to a ``register_tools(mcp: FastMCP) -> None`` callable.
+    """
+    import importlib.metadata
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    try:
+        eps = importlib.metadata.entry_points(group="codehydra.plugins")
+    except TypeError:
+        # Python <3.12 compat: entry_points() returns a dict.
+        eps = importlib.metadata.entry_points().get("codehydra.plugins", [])
+
+    for ep in eps:
+        try:
+            register_fn = ep.load()
+            register_fn(mcp)
+            _log.info("Loaded plugin: %s", ep.name)
+        except Exception as exc:
+            _log.warning("Failed to load plugin %s: %s", ep.name, exc)
+
+_load_plugins()
+
+
 if __name__ == "__main__":
     import argparse as _ap
     _p = _ap.ArgumentParser(description="CodeHydra built-in MCP server")

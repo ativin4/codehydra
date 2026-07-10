@@ -124,6 +124,38 @@ export OLLAMA_HOST=https://your-ollama-host
 
 ---
 
+## Plugins
+
+CodeHydra supports plugins that extend its capabilities via MCP tools. Plugins are auto-discovered at startup — install one and it's immediately available.
+
+```bash
+# Install a plugin
+uv pip install -e plugins/codehydra-finmerge
+```
+
+### FinMerge — Trade Statement Processor
+
+Process PDF trade statements from Indian and international brokers into tax-ready capital gains reports.
+
+- **Multi-broker**: Zerodha, Groww, Angel One, Interactive Brokers, Schwab, Vested, and more
+- **FIFO matching**: Automatic lot matching as required by Indian tax law
+- **Tax-ready**: STCG/LTCG classification, Schedule FA for foreign assets
+- **Local LLM**: Curated catalog of 11 open-source models for intelligent PDF parsing
+- **Privacy-first**: All processing is local — your financial data never leaves your machine
+
+```
+# MCP tools available after install:
+process_trade_statements   # Batch-process PDFs → tax reports
+preview_statement          # Dry-run a single PDF
+setup_finmerge             # One-click Ollama + model setup
+finmerge_model             # Browse/pull/manage local models
+stop_finmerge              # Stop the Ollama server
+```
+
+See [`plugins/codehydra-finmerge/README.md`](plugins/codehydra-finmerge/README.md) for full documentation.
+
+---
+
 ## Current State
 
 This is an early-stage project. The core loop (routing, fallback, sessions, streaming) works. Known rough edges:

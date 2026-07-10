@@ -7,7 +7,7 @@ __pycache__/
 .agy/
 node_modules/
 .DS_Store
-codehydra.egg-info/
+*.egg-info/
 dist/
 assets/*.cast
 assets/frames/

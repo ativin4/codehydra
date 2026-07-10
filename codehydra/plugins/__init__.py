@@ -1,0 +1,1 @@
+# CodeHydra plugins package.
