@@ -525,14 +525,18 @@ class TestGatewayQuotaFallback:
 # End-to-end: real cloud CLI (claude)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live
 class TestCloudCLI:
     """Requires active claude CLI session. Skipped if claude not found."""
 
     @pytest.fixture(autouse=True)
     def skip_if_no_claude(self):
-        import shutil
-        if not shutil.which("claude"):
-            pytest.skip("claude CLI not on PATH")
+        import os
+        from codehydra.auth.scavenger import Scavenger
+        if os.environ.get("CODEHYDRA_LIVE_EVALS") != "1":
+            pytest.skip("set CODEHYDRA_LIVE_EVALS=1 to run cloud CLI evaluations")
+        if not Scavenger().get_cli_auth_status().get("claude"):
+            pytest.skip("requires an authenticated claude CLI session")
 
     def test_simple_request(self):
         from codehydra.routing.gateway import Gateway

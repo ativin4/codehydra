@@ -542,13 +542,17 @@ class TestTUIHeadless:
 # 3. Real CLI evals (require active claude session)
 # ============================================================
 
+@pytest.mark.live
 class TestRealCLIEvals:
 
     @pytest.fixture(autouse=True)
     def require_claude(self):
-        import shutil
-        if not shutil.which("claude"):
-            pytest.skip("claude CLI not on PATH")
+        import os
+        from codehydra.auth.scavenger import Scavenger
+        if os.environ.get("CODEHYDRA_LIVE_EVALS") != "1":
+            pytest.skip("set CODEHYDRA_LIVE_EVALS=1 to run cloud CLI evaluations")
+        if not Scavenger().get_cli_auth_status().get("claude"):
+            pytest.skip("requires an authenticated claude CLI session")
 
     async def test_prompt_updates_history(self, tmp_cwd):
         """Real prompt through TUI — history gains user+assistant entries."""

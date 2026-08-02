@@ -72,7 +72,7 @@ codehydra -r <id>      # resume a specific session by ID
 |---|---|
 | `/effort <low\|medium\|high>` | Set effort tier — affects which model gets used |
 | `/cli <auto\|claude\|agy\|codex\|ollama>` | Pin a specific CLI for this session |
-| `/model <name\|auto>` | Override the model directly |
+| `/model <name\|provider/name\|auto>` | Pin a model; pair a bare name with `/cli`, or qualify it (for example `codex/gpt-5.6-terra`) |
 | `/mode <plan\|yolo>` | `plan` = read-only; `yolo` = auto-approve edits (default) |
 | `/parallel "task 1" "task 2"` | Run multiple prompts concurrently |
 | `/resume [id]` | Resume a saved session in-TUI |
@@ -103,9 +103,9 @@ args = ["-y", "@modelcontextprotocol/server-puppeteer"]
 priority = ["claude", "agy", "codex", "ollama"]
 
 [routing.models.claude]
-high   = "claude-sonnet-4-5"
-medium = "claude-haiku-4-5"
-low    = "claude-haiku-4-5"
+high   = "opus"
+medium = "sonnet"
+low    = "haiku"
 ```
 
 ---
@@ -195,6 +195,21 @@ pytest tests/
 ```
 
 Open an issue, drop a comment, or just try it and tell me where it breaks. All feedback welcome.
+
+## Verification
+
+The standard test suite is offline-safe; cloud tests are skipped unless
+explicitly enabled:
+
+```bash
+pytest
+
+# Runs the native Codex agentic-edit evaluation in a disposable git repo.
+# Set the model to one available to your Codex account.
+CODEHYDRA_LIVE_EVALS=1 \
+CODEHYDRA_LIVE_EVAL_CODEX_MODEL=gpt-5.6-terra \
+pytest -m live
+```
 
 ---
 

@@ -45,6 +45,9 @@ include = ["codehydra*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: requires an authenticated cloud coding CLI and may consume subscription usage",
+]
 
 [dependency-groups]
 dev = [

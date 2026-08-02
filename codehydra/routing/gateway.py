@@ -40,23 +40,22 @@ STREAM_RESET = "\x00__HYDRA_STREAM_RESET__\x00"
 
 
 class Gateway:
-    # Default auto-mode model try-order per tier. claude/codex use rolling
-    # aliases ("sonnet"/"haiku"/"opus", "default") that auto-resolve to the
-    # latest model. Gemini's CLI has no such aliases (its "-latest" names
-    # 404) so its entries are pinned to specific model versions and need
-    # updating as new generations ship — override via [routing.model_map]
-    # in .agentrc.toml instead of editing this code.
+    # Default auto-mode model try-order per tier. Claude and Codex use rolling
+    # aliases ("sonnet"/"haiku"/"opus", "default") that resolve through the
+    # user's subscription. Agy model IDs are concrete names reported by
+    # `agy models`; override these in [routing.model_map] when its catalog
+    # changes.
     MODEL_MAP = {
-        Tier.LOW:    ["anthropic/haiku",  "codex/default", "agy/agy-2.5-flash", "ollama/llama3.2"],
-        Tier.MEDIUM: ["anthropic/sonnet", "codex/default", "agy/agy-2.5-pro",   "ollama/llama3.2"],
-        Tier.HIGH:   ["anthropic/opus",   "codex/default", "agy/agy-2.5-pro",   "ollama/llama3.3"],
+        Tier.LOW:    ["anthropic/haiku",  "codex/default", "agy/gemini-3.6-flash-low",    "ollama/llama3.2"],
+        Tier.MEDIUM: ["anthropic/sonnet", "codex/default", "agy/gemini-3.6-flash-medium", "ollama/llama3.2"],
+        Tier.HIGH:   ["anthropic/opus",   "codex/default", "agy/gemini-3.1-pro-high",      "ollama/llama3.3"],
     }
 
     # Default model used for each CLI/tier when /cli pins a backend without
     # /model. Override via [routing.models.<cli>] in .agentrc.toml.
     CLI_DEFAULT_MODELS = {
         CLI.CLAUDE: {Tier.LOW: "haiku",            Tier.MEDIUM: "sonnet",          Tier.HIGH: "opus"},
-        CLI.AGY:    {Tier.LOW: "agy-2.5-flash",    Tier.MEDIUM: "agy-2.5-pro",     Tier.HIGH: "agy-2.5-pro"},
+        CLI.AGY:    {Tier.LOW: "gemini-3.6-flash-low", Tier.MEDIUM: "gemini-3.6-flash-medium", Tier.HIGH: "gemini-3.1-pro-high"},
         CLI.CODEX:  {Tier.LOW: "default",          Tier.MEDIUM: "default",         Tier.HIGH: "default"},
         CLI.OLLAMA: {Tier.LOW: "llama3.2",         Tier.MEDIUM: "llama3.2",        Tier.HIGH: "llama3.3"},
     }
@@ -69,6 +68,19 @@ class Gateway:
         "github":    "github",
         "codex":     "github",
         "ollama":    "ollama",
+    }
+
+    # Both provider names and the CLI names people naturally type are accepted
+    # in [routing].priority. Keep the stored form aligned with PROVIDER_MAP.
+    PRIORITY_ALIASES = {
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+        "google": "google",
+        "gemini": "google",
+        "agy": "google",
+        "github": "github",
+        "codex": "github",
+        "ollama": "ollama",
     }
 
     # Flags that put each CLI in non-interactive mode, per session /mode.
@@ -88,8 +100,7 @@ class Gateway:
         },
         Mode.PLAN: {
             CLI.CLAUDE: ["--permission-mode", "plan"],
-            # print mode is inherently non-destructive; no extra flags needed.
-            CLI.AGY:    [],
+            CLI.AGY:    ["--mode", "plan"],
             CLI.CODEX:  ["-s", "read-only"],
         },
     }
@@ -136,7 +147,12 @@ class Gateway:
         self.claude_mcp_config_path = self._write_mcp_configs()
 
         routing_cfg = load_routing_config()
-        self.priority: Optional[List[str]] = routing_cfg.get("priority")
+        configured_priority = routing_cfg.get("priority")
+        self.priority: Optional[List[str]] = (
+            [self.PRIORITY_ALIASES.get(str(name).lower(), str(name).lower()) for name in configured_priority]
+            if isinstance(configured_priority, list)
+            else None
+        )
 
         self.model_map = dict(self.MODEL_MAP)
         for tier, models in routing_cfg.get("model_map", {}).items():
@@ -326,7 +342,23 @@ class Gateway:
         content chunk. Token counts are not reported by this CLI version."""
         return line, None
 
-    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str, mode: str = "yolo", stream: bool = False, media_files: List[Path] = []):
+    @staticmethod
+    def _effort_flags(cli_name: str, tier: Optional[str]) -> List[str]:
+        """Return the native CLI flags for CodeHydra's normalized effort tier."""
+        if tier not in (Tier.LOW, Tier.MEDIUM, Tier.HIGH):
+            return []
+        if cli_name in (CLI.CLAUDE, CLI.AGY):
+            return ["--effort", str(tier)]
+        if cli_name == CLI.CODEX:
+            # Codex exposes per-request effort as a config override rather
+            # than a dedicated exec flag. Quote it as TOML so every supported
+            # Codex version parses it consistently.
+            return ["-c", f'model_reasoning_effort="{tier}"']
+        return []
+
+    def _build_cmd(self, cli_name: str, messages: List[Dict[str, str]], model: str,
+                   mode: str = "yolo", stream: bool = False, media_files: List[Path] = [],
+                   tier: Optional[str] = None):
         """Builds the subprocess argv + env for invoking a CLI with a prompt."""
         cli_path = shutil.which(cli_name)
         if not cli_path:
@@ -413,9 +445,12 @@ class Gateway:
             # No --output-format flag exists in agy 1.x; plain text is default.
             cmd = [cli_path, "--print", full_prompt, "--model", model_name]
         elif cli_name == CLI.CODEX:
-            # codex exec: model defaults to account default; don't pass -m with
-            # "default" since it's not a valid -m value.
-            cmd = [cli_path, "exec", full_prompt]
+            # Codex's "default" is an instruction to use the account default,
+            # not a valid value for `-m`. Any explicit /model is forwarded.
+            cmd = [cli_path, "exec"]
+            if model_name != "default":
+                cmd += ["--model", model_name]
+            cmd.append(full_prompt)
         elif cli_name == CLI.CLAUDE:
             cmd = [cli_path, "-p", full_prompt, "--model", model_name]
             if claude_system_prompt:
@@ -430,6 +465,8 @@ class Gateway:
         insert_at = 2 if cli_name == CLI.CODEX else 1
         mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO]).get(cli_name, [])
         cmd[insert_at:insert_at] = mode_flags
+        effort_flags = self._effort_flags(cli_name, tier)
+        cmd[insert_at + len(mode_flags):insert_at + len(mode_flags)] = effort_flags
 
         # Wire up MCP servers.
         if self.mcp_servers:
@@ -441,7 +478,7 @@ class Gateway:
                     for key, value in server.items():
                         mcp_flags += ["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"]
                 # Insert after mode flags, before the prompt positional arg.
-                flag_pos = insert_at + len(mode_flags)
+                flag_pos = insert_at + len(mode_flags) + len(effort_flags)
                 cmd[flag_pos:flag_pos] = mcp_flags
             # agy reads mcpServers from .agy/settings.json automatically.
 
@@ -545,7 +582,7 @@ class Gateway:
 
     def _run_cli(self, cli_name: str, messages: List[Dict[str, str]], model: str, tier: Optional[str] = None, mode: str = "yolo", media_files: List[Path] = []) -> str:
         """Executes a local CLI (agy, codex, claude) and returns its full output."""
-        cmd, env = self._build_cmd(cli_name, messages, model, mode, media_files=media_files)
+        cmd, env = self._build_cmd(cli_name, messages, model, mode, media_files=media_files, tier=tier)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, env=env,
                                     stdin=subprocess.DEVNULL, timeout=self._CLI_TIMEOUT)
@@ -577,6 +614,7 @@ class Gateway:
         already seen (new conversation, /resume, or /mode//model change)."""
         model_name = model.split("/")[-1]
         mode_flags = self.MODE_FLAGS.get(mode, self.MODE_FLAGS[Mode.YOLO])["claude"]
+        effort = tier if tier in (Tier.LOW, Tier.MEDIUM, Tier.HIGH) else None
         system_prompt = next((m["content"] for m in messages if m["role"] == Role.SYSTEM), "")
         non_system = [m for m in messages if m["role"] != Role.SYSTEM]
         if not non_system:
@@ -591,7 +629,7 @@ class Gateway:
         is_continuation = (
             self._claude_session is not None
             and self._claude_session.alive()
-            and self._claude_session.matches(model_name, mode_flags, system_prompt)
+            and self._claude_session.matches(model_name, mode_flags, system_prompt, effort)
             and complete_pairs == self._claude_history_len
         )
 
@@ -602,7 +640,7 @@ class Gateway:
                 self._claude_session.close()
             self._claude_session = ClaudeSession(
                 model_name, mode_flags, system_prompt=system_prompt,
-                mcp_config_path=self.claude_mcp_config_path,
+                mcp_config_path=self.claude_mcp_config_path, effort=effort,
             )
             self._claude_history_len = 0
             # Replay prior turns as context so Claude isn't starting blind after
@@ -669,13 +707,35 @@ class Gateway:
     def _resolve_cli_and_model(
         self, cli_override: Optional[str], model_override: Optional[str], tier: str
     ) -> Optional[tuple]:
-        """Returns (cli_name, full_model_str) when cli_override is set, else None."""
-        if not cli_override or cli_override == "auto":
+        """Resolve explicit backend and model choices into (CLI, provider/model).
+
+        A bare model name needs a pinned CLI so CodeHydra knows which native
+        command accepts it. A qualified provider/model (for example
+        ``codex/gpt-5.4``) also works on its own and pins that provider.
+        """
+        selected_cli = cli_override if cli_override and cli_override != "auto" else None
+        if selected_cli and selected_cli not in self.cli_default_models:
+            raise Exception(f"Unknown CLI override: {selected_cli}")
+
+        if model_override:
+            if "/" in model_override:
+                model_cli = self._cli_for_model(model_override)
+                if selected_cli and model_cli != selected_cli:
+                    raise Exception(
+                        f"Model '{model_override}' belongs to {model_cli}; "
+                        f"it cannot be used with /cli {selected_cli}."
+                    )
+                return model_cli, model_override
+            if not selected_cli:
+                raise Exception(
+                    "A bare /model needs a pinned /cli. Use /cli <backend> first "
+                    "or provide a qualified model such as codex/gpt-5.4."
+                )
+            return selected_cli, f"{selected_cli}/{model_override}"
+
+        if not selected_cli:
             return None
-        if cli_override not in self.cli_default_models:
-            raise Exception(f"Unknown CLI override: {cli_override}")
-        model_name = model_override or self.cli_default_models[cli_override][tier]
-        return cli_override, f"{cli_override}/{model_name}"
+        return selected_cli, f"{selected_cli}/{self.cli_default_models[selected_cli][tier]}"
 
     def _fallback_models_after_override(self, failed_cli: str, tier: str) -> List[str]:
         """Auto-mode candidates excluding the backend that just hit quota."""
@@ -725,7 +785,10 @@ class Gateway:
 
         # agy 1.x outputs plain text; the stream=True flag no longer switches
         # to stream-json (that flag was removed in agy 1.x).
-        cmd, env = self._build_cmd(cli_name, messages, model, mode, stream=False, media_files=media_files)
+        cmd, env = self._build_cmd(
+            cli_name, messages, model, mode, stream=False,
+            media_files=media_files, tier=tier,
+        )
         # Both agy and codex output plain text line-by-line via PTY.
         line_parser = self._parse_agy_stream_line if cli_name == CLI.AGY else None
 

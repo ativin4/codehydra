@@ -83,7 +83,7 @@ HELP_TEXT = """\
 ### Routing
 - `/effort low|medium|high` — set effort tier (model quality)
 - `/cli auto|claude|agy|codex|ollama` — pin backend CLI
-- `/model <name|auto>` — pin exact model name
+- `/model <name|provider/name|auto>` — pin a model; bare names require `/cli`
 - `/mode plan|yolo` — `plan`=read-only, `yolo`=auto-approve edits
 
 ### Auth

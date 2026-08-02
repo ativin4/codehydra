@@ -23,13 +23,15 @@ class ClaudeSession:
     """
 
     def __init__(self, model: str, mode_flags: List[str], system_prompt: str = "",
-                 mcp_config_path: Optional[str] = None):
+                 mcp_config_path: Optional[str] = None, effort: Optional[str] = None):
         cli_path = shutil.which("claude")
         if not cli_path:
             raise Exception("'claude' CLI not found on PATH.")
 
         cmd = [cli_path, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                "--include-partial-messages", "--verbose", "--model", model] + mode_flags
+        if effort:
+            cmd += ["--effort", effort]
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
         if mcp_config_path:
@@ -38,6 +40,7 @@ class ClaudeSession:
         self.model = model
         self.mode_flags = mode_flags
         self.system_prompt = system_prompt
+        self.effort = effort
         self.last_result_text = ""
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -62,9 +65,10 @@ class ClaudeSession:
     def _get_stderr(self) -> str:
         return "".join(self._stderr_lines[-50:]).strip()
 
-    def matches(self, model: str, mode_flags: List[str], system_prompt: str = "") -> bool:
+    def matches(self, model: str, mode_flags: List[str], system_prompt: str = "",
+                effort: Optional[str] = None) -> bool:
         return (self.model == model and self.mode_flags == mode_flags
-                and self.system_prompt == system_prompt)
+                and self.system_prompt == system_prompt and self.effort == effort)
 
     def alive(self) -> bool:
         return self._proc.poll() is None

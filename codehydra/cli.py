@@ -1,7 +1,16 @@
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 import sys
 
 from codehydra.tui import HydraApp
+
+
+def _version() -> str:
+    """Return installed package metadata, with a source-tree fallback."""
+    try:
+        return version("codehydra")
+    except PackageNotFoundError:
+        return "0.1.0"
 
 
 def _pick_session():
@@ -49,6 +58,7 @@ def main():
         prog="codehydra",
         description="CodeHydra — multi-CLI autonomous coding agent TUI",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     parser.add_argument(
         "--resume", "-r",
         nargs="?",          # 0 or 1 args: bare flag → const; --resume id → id

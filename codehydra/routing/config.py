@@ -9,14 +9,14 @@ def load_routing_config(root_dir: str = ".") -> Dict[str, Any]:
     Supported keys, all optional:
 
         [routing]
-        priority = ["anthropic", "google", "github"]  # CLI try-order for auto mode
+        priority = ["claude", "agy", "codex"]  # CLI or provider try-order for auto mode
 
         [routing.models]   # override the default model used per CLI/tier
         [routing.models.agy]
-        low = "agy-flash-lite-latest"
+        low = "gemini-3.6-flash-low"
 
         [routing.model_map]   # override the auto-mode model try-order per tier
-        low = ["agy/agy-flash-lite-latest", "anthropic/haiku"]
+        low = ["agy/gemini-3.6-flash-low", "anthropic/haiku"]
 
     Returns {} if no config file or no [routing] table is present.
     """

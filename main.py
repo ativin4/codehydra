@@ -1,4 +1,4 @@
-from codehydra.cli import app
+from codehydra.cli import main
 
 if __name__ == "__main__":
-    app()
+    main()
