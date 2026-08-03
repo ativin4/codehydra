@@ -19,6 +19,9 @@ import json
 
 import pytest
 
+# Skip entire module if the finmerge plugin is not installed.
+pytest.importorskip("codehydra_finmerge", reason="codehydra-finmerge plugin not installed")
+
 from codehydra_finmerge.models import (
     AssetRegion, GainType, Trade, TradeAction, TaxLot, OpenPosition, TaxSummary,
 )
